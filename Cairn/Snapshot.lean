@@ -19,7 +19,7 @@ inductive Hist where
   | look (prev : Hist)
 
 def Hist.state : Hist → Map
-  | .empty => []
+  | .empty => Map.empty
   | .write prev ops => applyBatch prev.state ops
   | .look prev => prev.state
 
@@ -30,7 +30,7 @@ def Hist.commits : Hist → List (List Op)
 
 /-- Fold the committed batches in admission order. -/
 def serial (commits : List (List Op)) : Map :=
-  commits.foldl applyBatch []
+  commits.foldl applyBatch Map.empty
 
 theorem state_eq_serial (h : Hist) : h.state = serial h.commits := by
   induction h with

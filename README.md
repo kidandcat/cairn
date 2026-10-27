@@ -1,6 +1,6 @@
 # cairn
 
-A small key-value store written in Lean 4 (toolchain `v4.35.0`, the same pin as [uvl](https://github.com/kidandcat/uvl)). One process, one writer per shard, an append-only log per shard, and an in-memory index rebuilt on open. `ShardSet` is the cluster surface: it owns one `DB` per shard id and routes with `shardOf`. A later network plugs into `Directory` and `Mailbox` without replacing the codec or the map.
+A small key-value store written in Lean 4 (toolchain `v4.35.0`, the same pin as [uvl](https://github.com/kidandcat/uvl)). One process, one writer per shard, an append-only log per shard, and an in-memory index rebuilt on open. The index is a persistent size-balanced tree (`Std.TreeMap`, delta 3, ratio 2). `get` is that tree's lookup. `insert` shares the branches a reader did not need. `ShardSet` is the cluster surface: it owns one `DB` per shard id and routes with `shardOf`. A later network plugs into `Directory` and `Mailbox` without replacing the codec or the map.
 
 It is meant for Lean apps that need to keep a map (game state, settings) on the targets uvl cares about: native Linux and macOS now, WebAssembly, Android, and a 32-bit microcontroller later. The core does not call FFI. Lengths in the codec are `UInt32` and sequence numbers are `UInt64`. There is no `USize` in the codec.
 
@@ -15,7 +15,7 @@ This is not a SQL database.
 - The frame checksum is non-reflected CRC-32, polynomial `0x04C11DB7`, init 0, no final xor (`sum32`). Proved: every error whose set bits lie in some window of 32 consecutive positions, at every message length. A one-bit error is that window with width 1. Two bits at distance 1 to 31 are the same window. Proved false: that every odd-weight error is detected (`sum32 [1, 4, 0xC1, 0x1D, 0xB7] = 0`, Hamming weight 15). Not proved: two bits farther apart. No fixed-width checksum rejects every altered string.
 - A torn tail is truncated. A bad frame with a later valid frame is `corrupt log` and `openFile` throws. `openFileRepair` truncates that damage on purpose. A file that is not a cairn file is left in place. None of these paths drops a bad frame silently.
 - Each record still carries the reflected ISO CRC-32 (`crc32`). That is a different function from the frame checksum.
-- `kill -9` is not a power loss. One run of `scripts/crash_demo.sh` on this machine recovered 147 keys, a prefix of the writes. The process was killed; the disk was not.
+- `kill -9` is not a power loss. One run of `scripts/crash_demo.sh` on this machine recovered 147 keys, a prefix of the writes. A later run recovered 144 keys, also a prefix. The process was killed; the disk was not.
 - Inside one shard the admission order of that shard's mutex is the serial order (`shard_hist_serial`, which is `state_eq_serial` on that shard's `Hist`). Two commits on different shards commute (`steps_commute`). There is no global snapshot and no serial order across shards.
 - `ShardSet.iterate` is the sorted merge of one snapshot per shard (`mergeAll`, `clusterEntries`). Each snapshot is that shard's `View` at the moment it was read. A commit on another shard can land between those reads. `cluster_partition` says that merging the home shards of one map returns exactly that map's entries. The runtime merge is of the views that were actually read, which need not be one moment.
 - A batch whose keys fall in more than one shard is rejected. The id a single-shard batch is sent to is `shardOf` of its key (`route_is_shardOf`).
@@ -34,7 +34,7 @@ This is not a SQL database.
 
 ## Concurrency
 
-Lean 4.35's `ST.Ref.swap` is documented as atomic. `Ref.set` is that swap, discarding the old value. Readers only `get` one immutable `View` (the map, the log, the next sequence number, and the epoch). They see the previous view or the new one.
+Lean 4.35's `ST.Ref.swap` is documented as atomic. `Ref.set` is that swap, discarding the old value. Readers only `get` one immutable `View` (the tree, the newest-first log, the next sequence number, and the epoch). They see the previous view or the new one. A commit conses the new record and inserts into the tree; both share structure with the view the reader may still hold.
 
 Each `DB` has its own `Std.Mutex Unit`. The lock is not re-entrant. The byte append and `sync` happen before `set`, so a reader does not observe a view whose bytes have not been synced. The order that shard's mutex admits commits is the serial order of that shard. `ShardSet` does not take a mutex around the set. Two commits whose keys route to different shards do not share a lock.
 
@@ -50,7 +50,7 @@ Bounds ought to be strictly increasing if the ranges should be non-empty. The un
 
 An `Epoch` is a generation plus the bounds. `Epoch.rebalance` increments the generation and stores the new bounds. It does not move bytes. `rebalance_partition` says an entry is still in the map iff it sits in its home shard under the new bounds: reassignment does not drop keys.
 
-`moved` compacts one shard's entries into a fresh log. `move_replays` says replaying that log is exactly those entries. `DB.adopt` writes that log and publishes the new epoch in one view. That is the local half of a split or a move. Nothing here ships the bytes to another machine, and nothing elects a leader.
+`moved` compacts one shard's entries into a fresh log. `move_replays` says replaying that log has the same `entries`. The tree shape may differ. `DB.adopt` writes that log and publishes the new epoch in one view. That is the local half of a split or a move. Nothing here ships the bytes to another machine, and nothing elects a leader.
 
 `routeOf` is the router's decision for a batch: `some (shardOf bounds k)` when every key is that shard, `none` when the batch is empty or crosses a shard (`route_is_shardOf`). `ShardSet.commit` uses that rule and then calls the one `DB`.
 
@@ -138,7 +138,7 @@ lake test
 | `ShardSet.publish` | Bump the directory generation and set the owner. Does not move bytes. |
 | `ShardSet.pushLog` | `planCatchup` then `Mailbox.send` for one shard. |
 
-Reads do not take the mutex. `get` is one `Ref.get` plus a lookup. `ShardSet.iterate` does one such read per shard, in shard-id order, with no lock across them.
+Reads do not take the mutex. `get` is one `Ref.get` plus a tree lookup. `ShardSet.iterate` does one such read per shard, in shard-id order, with no lock across them. The memory backend appends by consing a frame. `readAll` joins those chunks. The record list in the `View` is newest-first for the same reason.
 
 ## On disk
 
@@ -163,12 +163,13 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 | `sum32_burst`, `sum32_one_bit`, `sum32_two_close`, `sum32_weight_one`, `sum32_detects_burst` | `sum32` is nonzero on a burst of width at most 32 bits, on a single set bit, on two bits at distance 1..31, and on Hamming weight 1. Xoring that error into an equal-length message changes the checksum. |
 | `not_all_odd_weight` | `sum32` of `[1, 4, 0xC1, 0x1D, 0xB7]` is 0 and the weight is odd. |
 | `nodup_replay` | Replay from empty has no duplicate keys. |
-| `compact_eq`, `compact_roundtrip` | Compaction replays to the same map, including through the codec. |
-| `entries_sorted`, `entries_perm` | Iteration is a sorted permutation of the map. |
+| `compact_eq`, `compact_roundtrip` | Compaction replays to the same `entries`, including through the codec. Not the same tree shape. |
+| `entries_sorted`, `entries_nodup`, `entries_of_get` | Iteration is sorted by key bytes, lists each key once, and agrees with `get`. |
+| `get_insert`, `get_insert_ne`, `get_remove` | Tree insert and erase have the map equations the list index had. |
 | `key_one_shard`, `shardOf_deterministic`, `shardOf_range` | One shard id per key per bounds, in range, a function of the inputs. |
 | `shardHash_range` | The hash id is `< n` when `n > 0`. |
 | `rebalance_partition`, `inShard_disjoint` | Rebinding ranges keeps every entry in exactly one home shard. |
-| `move_replays`, `moved_state` | The snapshot log of one shard replays to that shard's entries. |
+| `move_replays`, `moved_state` | The snapshot log of one shard replays to that shard's `entries`. |
 | `state_eq_serial`, `snapshot_stable` | In the history model, state is the serial fold, and a taken snapshot stays that state. |
 | `catchUp_state`, `prefix_log_catchup`, `truncate_catchup`, `crash_is_prefix` | Same-epoch catch-up matches the leader, including after a byte-prefix crash. |
 | `append_extends`, `install_replaces`, `append_rejects_epoch` | The apply step appends, replaces, or keeps the log. |
@@ -183,7 +184,7 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 
 `#print axioms` on `sum32_burst`, `sum32_detects_burst`, `recovery_keeps_synced`, `decodeFile_prefix`, and `recovery_prefix` reports `propext`, `Quot.sound`, and `Classical.choice`.
 
-Not proved: that `IO.Ref.set` is atomic, that the mutex admits no two critical sections, that the C shim's `fdatasync` / `fsync` / `rename` match POSIX (the calls are what `strace` showed; the kernel's meaning is assumed), that `sum32` detects every change, two-bit errors farther than 31 bits, or anything about a network. The byte-prefix theorems are about a prefix of a well-formed encoding. A checksum collision can append a frame that is not a prefix; that is outside the theorem. The crash-cut test checks a sample of indexes (`sampleCuts`: the first 80 bytes, the 4096-byte edges, and the offsets 17 and 40 into each frame). The proof is for every index.
+Not proved: a big-O bound on the tree. `Std.TreeMap` keeps the size-balance invariant (delta 3, ratio 2) inside the library; cairn proves the `get` / `insert` / `erase` equations and that `entries` is the sorted binding list. Not proved: that `IO.Ref.set` is atomic, that the mutex admits no two critical sections, that the C shim's `fdatasync` / `fsync` / `rename` match POSIX (the calls are what `strace` showed; the kernel's meaning is assumed), that `sum32` detects every change, two-bit errors farther than 31 bits, or anything about a network. The byte-prefix theorems are about a prefix of a well-formed encoding. A checksum collision can append a frame that is not a prefix; that is outside the theorem. The crash-cut test checks a sample of indexes (`sampleCuts`: the first 80 bytes, the 4096-byte edges, and the offsets 17 and 40 into each frame). The proof is for every index.
 
 ## What is tested
 
@@ -197,7 +198,7 @@ fuzz [(detect, 1591), (torn, 89), (miss, 0), (forge, 0), (same, 0)]
 
 `miss` would have accepted the altered bytes as the original records. `forge` would have produced a record list that is not a prefix. Both stayed at 0 on this set. That is a measurement, not a proof that every flip is caught. The 89 torn results are prefixes and are truncated.
 
-`strace` of `cairn-crash-writer` (two puts) showed `fdatasync` of the new file, `fsync` of the directory, then `fdatasync` after each put. `strace` of `cairn-sync-trace` showed the same create barrier, `fdatasync` of `path.cairn-tmp`, `rename` onto the live path, and `fsync` of the directory. This machine has no `dmsetup` or `modprobe`, so `dm-flakey` was not run. The power cord was not pulled. `kill -9` is a separate demo: `scripts/crash_demo.sh` waits 0.3 s and kills the writer. One run printed `recovered 147 keys, a prefix of the committed writes`.
+`strace` of `cairn-crash-writer` (two puts) showed `fdatasync` of the new file, `fsync` of the directory, then `fdatasync` after each put. `strace` of `cairn-sync-trace` showed the same create barrier, `fdatasync` of `path.cairn-tmp`, `rename` onto the live path, and `fsync` of the directory. This machine has no `dmsetup` or `modprobe`, so `dm-flakey` was not run. The power cord was not pulled. `kill -9` is a separate demo: `scripts/crash_demo.sh` waits 0.3 s and kills the writer. One run printed `recovered 147 keys, a prefix of the committed writes`. A run after the tree index printed `recovered 144 keys, a prefix of the committed writes`.
 
 ## Benchmarks
 
@@ -220,20 +221,35 @@ The three checksum repetitions of each function printed the same nanoseconds and
 
 These numbers are one measurement on this machine. They are not a claim about other disks. A disk that waits for stable media will be slower than this ext4.
 
-`cairn-design-bench` is the same machine, one run, three repetitions, through `ShardSet` (the router), not through a raw `DB`. Opens are outside the clock. `file-shards-N` is N dedicated tasks, N files, 100 `put`s each, one `fdatasync` per put. `mem-shards-N` is the same shape on the memory backend. `file-group-32-shards-4` packs 128 puts per shard into segments of 32, one `fdatasync` per segment, four shards at once. `file-contended-1-tasks-4` is four tasks writing one shard.
+`cairn-design-bench` is the same machine, through `ShardSet` (the router), not through a raw `DB`. Opens are outside the clock. `file-shards-N` is N dedicated tasks, N files, 100 `put`s each, one `fdatasync` per put. `mem-shards-N` is the same shape on the memory backend. `file-group-32-shards-4` packs 128 puts per shard into segments of 32, one `fdatasync` per segment, four shards at once. `file-contended-1-tasks-4` is four tasks writing one shard. Each block below is one run of three repetitions. They are not averaged.
+
+Before the tree and the chunked memory log (associative list, `buf ++ frame`, `v.log ++ [record]`):
 
 ```
-file-shards-1 ops=100  224989ns/op 4444ops/s  156568ns/op 6387ops/s  163593ns/op 6112ops/s
-file-shards-2 ops=200  127894ns/op 7818ops/s  103404ns/op 9670ops/s  93035ns/op 10748ops/s
-file-shards-4 ops=400  56760ns/op 17618ops/s  53457ns/op 18706ops/s  61310ns/op 16310ops/s
-mem-shards-1 ops=100  5482020ns/op 182ops/s  5406456ns/op 184ops/s  5383518ns/op 185ops/s
-mem-shards-2 ops=200  2725123ns/op 366ops/s  2713650ns/op 368ops/s  2726411ns/op 366ops/s
-mem-shards-4 ops=400  1428210ns/op 700ops/s  1440656ns/op 694ops/s  1428952ns/op 699ops/s
-file-group-32-shards-4 ops=512  6425ns/op 155642ops/s  5400ns/op 185185ops/s  5601ns/op 178539ops/s
-file-contended-1-tasks-4 ops=400  209802ns/op 4766ops/s  181693ns/op 5503ops/s  208523ns/op 4795ops/s
+file-shards-1 ops=100  206093ns/op 4852ops/s  276915ns/op 3611ops/s  195993ns/op 5102ops/s
+file-shards-2 ops=200  120833ns/op 8275ops/s  86026ns/op 11624ops/s  109377ns/op 9142ops/s
+file-shards-4 ops=400  61085ns/op 16370ops/s  57966ns/op 17251ops/s  58748ns/op 17021ops/s
+mem-shards-1 ops=100  5478466ns/op 182ops/s  5409442ns/op 184ops/s  5391236ns/op 185ops/s
+mem-shards-2 ops=200  2803036ns/op 356ops/s  2784675ns/op 359ops/s  2722233ns/op 367ops/s
+mem-shards-4 ops=400  1406929ns/op 710ops/s  1394600ns/op 717ops/s  1380735ns/op 724ops/s
+file-group-32-shards-4 ops=512  11336ns/op 88214ops/s  5189ns/op 192715ops/s  5644ns/op 177179ops/s
+file-contended-1-tasks-4 ops=400  195137ns/op 5124ops/s  213681ns/op 4679ops/s  233684ns/op 4279ops/s
 ```
 
-On this ext4, four shards did about three times the single-shard rate (about 16–19k ops/s against about 4.4–6.4k). Two shards sat in between. Four tasks on one shard stayed at the single-shard rate. The group row pays one barrier per 32 records, so the per-put cost drops to about 5–6 µs. The memory rows scale the same way (one shard, then about double, then about quadruple) but the absolute rate is the memory backend copying every 4096-byte frame onto the whole log on each append. They are not a measurement of the router by itself, and they are not a disk.
+After (`Std.TreeMap`, memory frames consed, record list newest-first):
+
+```
+file-shards-1 ops=100  190454ns/op 5250ops/s  168778ns/op 5924ops/s  208253ns/op 4801ops/s
+file-shards-2 ops=200  78123ns/op 12800ops/s  92477ns/op 10813ops/s  115542ns/op 8654ops/s
+file-shards-4 ops=400  53649ns/op 18639ops/s  70828ns/op 14118ops/s  53762ns/op 18600ops/s
+mem-shards-1 ops=100  59268ns/op 16872ops/s  38080ns/op 26260ops/s  33897ns/op 29501ops/s
+mem-shards-2 ops=200  35357ns/op 28282ops/s  18389ns/op 54380ops/s  17948ns/op 55716ops/s
+mem-shards-4 ops=400  19539ns/op 51179ops/s  18866ns/op 53005ops/s  9567ns/op 104525ops/s
+file-group-32-shards-4 ops=512  9212ns/op 108554ops/s  8485ns/op 117855ops/s  8311ns/op 120322ops/s
+file-contended-1-tasks-4 ops=400  153274ns/op 6524ops/s  154198ns/op 6485ops/s  153646ns/op 6508ops/s
+```
+
+On this ext4 the file rows stay on the `fdatasync` cost: one shard about 0.17–0.28 ms/op in both runs, four shards about 14–19k ops/s. Four tasks on one shard stay on that shard's mutex. The group row is one barrier per 32 records, about 5–12 µs/op across the two runs. The memory rows were the copy. One shard went from about 5.4–5.5 ms/op to about 34–59 µs/op. Two and four shards still scale. Those memory rows are not a disk, and 100 keys do not show the tree's asymptotic gap against the old linear scan: the byte-log copy dominated that benchmark. An earlier list-index run of this harness is in the history of this file; it is not part of this pair.
 
 ## Building
 

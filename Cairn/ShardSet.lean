@@ -257,7 +257,7 @@ def ShardSet.pushLog (s : ShardSet) (box : Mailbox) (shard : Nat) (follower : Re
     (dst : NodeId) : IO Unit := do
   let db ← slot s shard
   let v ← db.snapshot
-  let leader : Replica := { epochGen := v.epoch.gen, log := v.log }
+  let leader : Replica := { epochGen := v.epoch.gen, log := v.records }
   match planCatchup follower leader with
   | none => throw (IO.userError "epoch mismatch")
   | some plan =>

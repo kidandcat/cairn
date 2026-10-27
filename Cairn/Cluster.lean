@@ -46,7 +46,7 @@ def moved (m : Map) (bounds : List Bytes) (s : Nat) (gen : Nat) : Replica where
   log := compactRecords (inShard bounds s m) 0
 
 theorem moved_state (m : Map) (h : NodupKeys m) (bounds : List Bytes) (s : Nat) (gen : Nat) :
-    (moved m bounds s gen).state = inShard bounds s m :=
+    entries (moved m bounds s gen).state = entries (inShard bounds s m) :=
   move_replays bounds s m h 0
 
 end Cairn

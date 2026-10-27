@@ -1,9 +1,10 @@
 /-
 Logical log. A record is one atomic batch. Replay folds batches onto the map.
 
-Compaction emits one put per surviving key, oldest first, so a fresh replay
-rebuilds the same list. A crash is a prefix of the encoded byte string; decoding
-it yields a prefix of the committed records.
+Compaction emits one put per surviving key, in key order. Replaying that log
+rebuilds the same entries. The tree that comes back need not have the same
+shape as the tree that was compacted. A crash is a prefix of the encoded byte
+string; decoding it yields a prefix of the committed records.
 -/
 
 import Cairn.Record
@@ -60,7 +61,7 @@ theorem nodup_applyBatch (m : Map) (ops : List Op) (h : NodupKeys m) :
       exact ih (applyOp m op) (nodup_applyOp m op h)
 
 def replay (rs : List Record) : Map :=
-  rs.foldl (fun m r => applyBatch m r.ops) []
+  rs.foldl (fun m r => applyBatch m r.ops) Map.empty
 
 theorem replay_append (a b : List Record) :
     replay (a ++ b) = b.foldl (fun m r => applyBatch m r.ops) (replay a) := by
@@ -74,52 +75,29 @@ theorem nodup_replay_from (m : Map) (rs : List Record) (h : NodupKeys m) :
       exact ih (applyBatch m r.ops) (nodup_applyBatch m r.ops h)
 
 theorem nodup_replay (rs : List Record) : NodupKeys (replay rs) :=
-  nodup_replay_from [] rs nodup_nil
+  nodup_replay_from Map.empty rs nodup_nil
 
 /-! ## Compaction -/
 
-/-- Oldest key first, so replay conses the newest entry back to the head. -/
-def toPuts : Map → List Op
-  | [] => []
-  | (k, v) :: m => toPuts m ++ [.put k v]
+/-- One put per live key, in `entries` order. -/
+def toPuts (m : Map) : List Op :=
+  (entries m).map fun e => .put e.1 e.2
 
-theorem nodup_tail {e : FitBytes × FitBytes} {m : Map} (h : NodupKeys (e :: m)) : NodupKeys m := by
-  cases h with
-  | cons _ ht => exact ht
-
-theorem nodup_head_fresh {e : FitBytes × FitBytes} {m : Map} (h : NodupKeys (e :: m)) :
-    ∀ e' ∈ m, e.1.bytes ≠ e'.1.bytes := by
-  cases h with
-  | cons hf _ => exact hf
-
-theorem remove_keeps (m : Map) (k : FitBytes)
-    (h : ∀ e, e ∈ m → k.bytes ≠ e.1.bytes) : remove m k = m := by
-  induction m with
-  | nil => simp [remove]
-  | cons e m ih =>
-      have htail : ∀ e', e' ∈ m → k.bytes ≠ e'.1.bytes := by
-        intro e' he
-        exact h e' (List.mem_cons_of_mem _ he)
-      have hpos : (!keyEq k e) = true := by
-        have hne : k.bytes ≠ e.1.bytes := h e List.mem_cons_self
-        cases hb : keyEq k e <;> simp_all [keyEq]
-      simp only [remove, List.filter_cons, hpos]
-      have ih' : m.filter (fun e => !keyEq k e) = m := by
-        simpa [remove] using ih htail
-      simp [ih']
-
-theorem apply_toPuts (m : Map) (h : NodupKeys m) : applyBatch [] (toPuts m) = m := by
-  induction m with
-  | nil => simp [toPuts]
-  | cons e m ih =>
+private theorem apply_mapped (m : Map) (es : List (FitBytes × FitBytes)) :
+    applyBatch m (es.map fun e => Op.put e.1 e.2) =
+      es.foldl (fun acc e => insert acc e.1 e.2) m := by
+  induction es generalizing m with
+  | nil => rfl
+  | cons e es ih =>
       cases e with
       | mk k v =>
-          have hm := nodup_tail h
-          have hf := nodup_head_fresh h
-          rw [toPuts, applyBatch_append, ih hm]
-          have hrm : remove m k = m :=
-            remove_keeps m k (fun e he => hf e he)
-          simp [applyOp, insert, hrm]
+          simp only [List.map_cons, applyBatch_cons, applyOp, List.foldl_cons, ih]
+
+theorem apply_toPuts (m : Map) (h : NodupKeys m) :
+    entries (applyBatch Map.empty (toPuts m)) = entries m := by
+  have _kept : NodupKeys m := h
+  rw [toPuts, apply_mapped]
+  simpa [ofPairs] using entries_rebuilt m
 
 /-- One record per surviving put. LSNs start at `start` and increase by one. -/
 def recordsOf (start : UInt64) : List Op → List Record
@@ -137,19 +115,22 @@ theorem fold_records (start : UInt64) (ops : List Op) (m : Map) :
       simp
 
 theorem replay_records (start : UInt64) (ops : List Op) :
-    replay (recordsOf start ops) = applyBatch [] ops := by
-  simpa [replay] using fold_records start ops []
+    replay (recordsOf start ops) = applyBatch Map.empty ops := by
+  simpa [replay] using fold_records start ops Map.empty
 
 def compactRecords (m : Map) (start : UInt64) : List Record :=
   recordsOf start (toPuts m)
 
+/-- Replaying the compacted log yields the same bindings. The tree shape may differ. -/
 theorem compact_eq (m : Map) (h : NodupKeys m) (start : UInt64) :
-    replay (compactRecords m start) = m := by
-  simp [compactRecords, replay_records, apply_toPuts m h]
+    entries (replay (compactRecords m start)) = entries m := by
+  rw [compactRecords, replay_records]
+  exact apply_toPuts m h
 
 theorem compact_roundtrip (m : Map) (h : NodupKeys m) (start : UInt64) :
-    replay (decodeLog (encodeLog (compactRecords m start))) = m := by
-  rw [decodeLog_encode, compact_eq m h start]
+    entries (replay (decodeLog (encodeLog (compactRecords m start)))) = entries m := by
+  rw [decodeLog_encode]
+  exact compact_eq m h start
 
 /-! ## Crash as a byte prefix -/
 
