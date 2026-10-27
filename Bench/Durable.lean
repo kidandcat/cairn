@@ -64,25 +64,40 @@ def showRep (name : String) (n : Nat) (run : IO Nat) : IO Unit := do
 def checksumBytes (n : Nat) : Bytes :=
   (List.range n).map fun i => UInt8.ofNat (i % 251)
 
-def timeSum (n : Nat) (f : Bytes → Unit) : IO Unit := do
+def nanosSink (k : IO UInt64) : IO (Nat × UInt64) := do
+  let t0 ← IO.monoNanosNow
+  let s ← k
+  let t1 ← IO.monoNanosNow
+  return (t1 - t0, s)
+
+/-- Repeat the fold so the timer sees the work, and keep the digest. -/
+def timeSum (name : String) (n reps : Nat) (f : Bytes → UInt64) : IO Unit := do
   let bs := checksumBytes n
-  let mut line := s!"checksum bytes={n}"
+  let mut line := s!"checksum {name} bytes={n} reps={reps}"
+  let total := n * reps
   for _ in [0:3] do
-    let dt ← nanos (pure (f bs))
-    let per := if n == 0 then 0 else dt / n
-    line := line ++ s!"  {per}ns/byte"
+    let (dt, sink) ← nanosSink do
+      let mut acc : UInt64 := 0
+      for _ in [0:reps] do
+        acc := acc ^^^ f bs
+      return acc
+    let per := if total == 0 then 0 else dt / total
+    line := line ++ s!"  {per}ns/byte sink={sink}"
   IO.println line
 
 def main : IO Unit := do
   let cpu ← IO.FS.readFile "/proc/cpuinfo"
-  let model := (cpu.splitOn "model name").getD 1 ""
-  IO.println (model.take 80)
+  let model := (cpu.splitOn "\n").find? (·.startsWith "model name") |>.getD "model name: unknown"
+  IO.println model
   showRep "sync-per-commit" 100 (repPuts 100)
   showRep "group-8" 256 (repGroup 256 8)
   showRep "group-32" 256 (repGroup 256 32)
   showRep "group-128" 256 (repGroup 256 128)
   let n := 4096
-  timeSum n fun bs => let _ := crc32 bs; ()
-  timeSum n fun bs => let _ := sum32 bs; ()
-  timeSum n fun bs => let _ := sum64 bs; ()
-  timeSum n fun bs => let _ := mix128 bs; ()
+  let reps := 401
+  timeSum "crc32" n reps fun bs => (crc32 bs).toUInt64
+  timeSum "sum32" n reps fun bs => (sum32 bs).toUInt64
+  timeSum "sum64" n reps sum64
+  timeSum "mix128" n reps fun bs =>
+    let (x, y) := mix128 bs
+    x ^^^ y
