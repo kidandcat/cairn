@@ -1,0 +1,8 @@
+/.lake
+/build
+/out
+*.olean
+*.ilean
+*.c
+*.o
+/tmp-cairn
