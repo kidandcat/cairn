@@ -5,6 +5,11 @@ One shard is one log. `resync` points every follower at the head replica.
 `moved` builds the log a shard should carry after a split: the compaction of
 that shard's entries. Replaying it is the projection (`move_replays`).
 
+The running cluster is `ShardSet`: one `DB` per shard, no global mutex.
+`Directory` says which host owns a shard. `planCatchup` is the per-shard log
+route a transport would send. This file stays the pure catch-up of a replica
+list.
+
 Cross-shard batches are rejected by `sameShard` at commit time. There is no
 two-phase commit and no cross-shard transaction.
 -/
