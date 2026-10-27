@@ -2,15 +2,15 @@
 
 ## Decisión
 
-El owner implementa **B ahora**: un escritor por shard, sin mutex global. Cada shard sigue siendo el diseño A (un mutex, un log, un `sync`). **C** (OCC serializable dentro del shard, con conjuntos de lectura y de escritura) solo si un shard se queda corto. No se implementan D, E ni varios escritores del mismo shard.
+El owner implementa **B ahora**: un escritor por shard, sin mutex global. Eso es `ShardSet` en `main`: un `DB` por shard, el mutex solo de ese shard, `shardOf` para enrutar. Cada shard sigue siendo el diseño A (un mutex, un log, un `sync`). **C** (OCC serializable dentro del shard, con conjuntos de lectura y de escritura) solo si un shard se queda corto. No se implementan D, E ni varios escritores del mismo shard. El informe de la fase está en `docs/shards.md`.
 
-Esa fase está en el PR del `ShardSet` (`cursor/shard-writer-35e9`), con el informe en `docs/shards.md`. Este PR no se mergea como código: `Bench/Design.lean` de esta rama es el arnés anterior, el de `Handle.flush`, y no debe sustituir al `cairn-design-bench` de `main`, que mide el router con `fdatasync`. El texto de abajo sigue siendo la comparación que llevó a la decisión.
+`cairn-design-bench` (`Bench/Design.lean`) es el banco del router: 1, 2 y 4 shards, fichero con `fdatasync` y memoria, más group commit y cuatro tareas en un solo shard. No entra en `lake test`. No es el programa que produjo las tablas de abajo.
 
-Las cifras de las tablas son de antes del `fdatasync` (PR #2). Miden `flush`, no una barrera de disco. Los números con `sync` real están en el README de `main` y en `docs/shards.md`. No se rehacen aquí y no se promedian con aquellas.
+Las cifras de las tablas son de antes del `fdatasync` (PR #2) y de antes de `ShardSet`. Salieron de un arnés que abría `DB` sueltos y llamaba a `Handle.flush`. Ese fuente no está en el árbol. Miden `flush`, no una barrera de disco. Los números con `sync` real y con el router están en el README y en `docs/shards.md`. No se rehacen aquí y no se promedian con aquellas.
 
 ## Qué era este documento
 
-Documento de decisión. No implementa escritores concurrentes. Cuando se escribió, `main` tenía un escritor por `DB` (`Std.Mutex` por base, lecturas de una `View` inmutable). Esta rama añade este texto y el microbenchmark que lo alimentó (`Bench/Design.lean`). Ese ejecutable no entra en `lake test`.
+Documento de decisión. No implementa escritores concurrentes. Cuando se escribió, `main` tenía un escritor por `DB` (`Std.Mutex` por base, lecturas de una `View` inmutable). El texto conserva esa comparación. El ejecutable de entonces no entra en `lake test` y ya no es `Bench/Design.lean`.
 
 Cada cifra de abajo es una de dos cosas:
 
@@ -59,12 +59,14 @@ No hay `fsync` ni `fdatasync` en `IO.FS.Handle`.
 
 ## Cómo se midió
 
+Esto describe el arnés de `Handle.flush`, no el `cairn-design-bench` actual. El actual imprime filas `file-shards-N` / `mem-shards-N` a través de `ShardSet`.
+
 Máquina de esta ejecución, leída antes del banco:
 
 - 4 CPU en línea, 1 hilo por núcleo, Intel Xeon modelo 207, hypervisor KVM, x86_64.
 - `/`, `/tmp` y el workspace en `/dev/vdc`, ext4. El temporal de `IO.FS.createTempDir` cae en ese volumen. No es un disco de producción ni un corte de corriente.
 
-Comando: `.lake/build/bin/cairn-design-bench`, tres pasadas seguidas (`rep` 1, 2 y 3) en el mismo proceso, después de 100 `put` de calentamiento. Reloj: `IO.monoNanosNow`. Throughput: `ops * 1000000000 / wall_ns`, división entera. Percentil: se ordena la lista de latencias y se toma el índice `(n - 1) * numer / denom`. Con 1000 muestras, p50 es el índice 499 y p99 el 989. Con 8 muestras, p99 no describe una cola: se publica igual y no se usa para decidir. El cronómetro **por operación** (dos lecturas de reloj) está dentro de la media y del percentil. En un `put` de ~30 µs es una fracción pequeña. En un `write` de cientos de nanosegundos es una fracción grande: esas medias son un techo.
+Comando de aquel arnés (el binario se llamaba igual, el fuente ya no está): tres pasadas seguidas (`rep` 1, 2 y 3) en el mismo proceso, después de 100 `put` de calentamiento. Reloj: `IO.monoNanosNow`. Throughput: `ops * 1000000000 / wall_ns`, división entera. Percentil: se ordena la lista de latencias y se toma el índice `(n - 1) * numer / denom`. Con 1000 muestras, p50 es el índice 499 y p99 el 989. Con 8 muestras, p99 no describe una cola: se publica igual y no se usa para decidir. El cronómetro **por operación** (dos lecturas de reloj) está dentro de la media y del percentil. En un `put` de ~30 µs es una fracción pequeña. En un `write` de cientos de nanosegundos es una fracción grande: esas medias son un techo.
 
 Qué hace cada fila:
 
