@@ -8,7 +8,8 @@ including a sector that keeps only a prefix of its new contents. The caller
 acknowledges a commit only after `sync` returns.
 
 The memory backend's `sync` is not a disk: it returns immediately and the
-bytes are only in the `IO.Ref`. The file backend's `sync` is `fdatasync` on
+bytes are only in the `IO.Ref`. An append conses the new frame; `readAll`
+joins the chunks oldest-first. The file backend's `sync` is `fdatasync` on
 Linux and `F_FULLFSYNC` (falling back to `fsync`) on macOS. `replaceAll`
 writes a new file, data-syncs it, renames it onto the target, and fsyncs the
 parent directory before it returns. A crash before the rename leaves the
@@ -31,11 +32,16 @@ structure Store where
   sync : IO Unit
   replaceAll : Bytes → IO Unit
 
-def Store.mem (buf : IO.Ref Bytes) : Store where
-  readAll := buf.get
-  append b := buf.modify (· ++ b)
+/-- Newest frame at the head. `readAll` reverses, then joins. -/
+def Store.mem (chunks : IO.Ref (List Bytes)) : Store where
+  readAll := do
+    let cs ← chunks.get
+    return cs.reverse.flatten
+  append b := do
+    let cs ← chunks.get
+    chunks.set (b :: cs)
   sync := pure ()
-  replaceAll := buf.set
+  replaceAll b := chunks.set [b]
 
 /-- Data-sync `bytes` into a temp file, rename it onto `path`, fsync the directory. -/
 def writeDurable (path : FilePath) (bytes : Bytes) : IO Unit := do

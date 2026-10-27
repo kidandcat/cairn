@@ -82,11 +82,12 @@ theorem rebalance_gen (e : Epoch) (bounds : List Bytes) :
   simp [Epoch.rebalance]
 
 def inShard (bounds : List Bytes) (s : Nat) (m : Map) : Map :=
-  m.filter fun e => decide (shardOf bounds e.1.bytes = s)
+  Std.TreeMap.filter (fun k (_v : FitBytes) => decide (shardOf bounds k.bytes = s)) m
 
 theorem mem_inShard (bounds : List Bytes) (s : Nat) (m : Map) (e : FitBytes × FitBytes) :
     e ∈ inShard bounds s m ↔ e ∈ m ∧ shardOf bounds e.1.bytes = s := by
-  simp [inShard, List.mem_filter]
+  rw [mem_iff_entries, mem_iff_entries]
+  simp only [inShard, entries, Std.TreeMap.toList_filter, List.mem_filter, decide_eq_true_eq]
 
 theorem mem_home (bounds : List Bytes) (m : Map) (e : FitBytes × FitBytes) (h : e ∈ m) :
     e ∈ inShard bounds (shardOf bounds e.1.bytes) m := by
@@ -107,11 +108,13 @@ theorem rebalance_partition (bounds : List Bytes) (m : Map) (e : FitBytes × Fit
 
 theorem nodup_inShard (bounds : List Bytes) (s : Nat) (m : Map) (h : NodupKeys m) :
     NodupKeys (inShard bounds s m) := by
-  simpa [NodupKeys, inShard] using List.Pairwise.filter (fun e => decide (shardOf bounds e.1.bytes = s)) h
+  have _kept : NodupKeys m := h
+  exact nodup_all (inShard bounds s m)
 
-/-- Snapshot of one shard: compact its entries and replay. The list comes back unchanged. -/
+/-- Snapshot of one shard: compact its entries and replay. The bindings come back. -/
 theorem move_replays (bounds : List Bytes) (s : Nat) (m : Map) (h : NodupKeys m) (start : UInt64) :
-    replay (compactRecords (inShard bounds s m) start) = inShard bounds s m :=
+    entries (replay (compactRecords (inShard bounds s m) start)) =
+      entries (inShard bounds s m) :=
   compact_eq _ (nodup_inShard bounds s m h) start
 
 end Cairn

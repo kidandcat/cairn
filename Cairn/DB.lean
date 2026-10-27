@@ -1,7 +1,7 @@
 /-
 Single-writer database.
 
-Readers call `IO.Ref.get` on one immutable `View` (map, log, next LSN, epoch).
+Readers call `IO.Ref.get` on one immutable `View` (tree, newest-first log, next LSN, epoch).
 `IO.Ref.set` is a `swap` of that pointer; the Lean runtime documents `swap` as
 atomic, so a reader sees the old view or the new one.
 
@@ -29,9 +29,14 @@ namespace Cairn
 
 structure View where
   index : Map
-  log : List Record
+  /-- Committed records, newest at the head. `records` is oldest first. -/
+  revLog : List Record
   nextLsn : UInt64
   epoch : Epoch
+
+/-- Chronological log. The stored spine stays newest-first so a commit can cons. -/
+def View.records (v : View) : List Record :=
+  v.revLog.reverse
 
 structure DB where
   store : Store
@@ -49,7 +54,7 @@ def DB.iterate (db : DB) : IO (List (FitBytes × FitBytes)) := do
   return entries (← db.snapshot).index
 
 def DB.readLog (db : DB) : IO (List Record) := do
-  return (← db.snapshot).log
+  return (← db.snapshot).records
 
 def DB.readEpoch (db : DB) : IO Epoch := do
   return (← db.snapshot).epoch
@@ -74,7 +79,7 @@ private def commitNow (db : DB) (ops : List Op) : IO Unit := do
   db.store.sync
   db.view.set {
     index := applyBatch v.index ops
-    log := v.log ++ [record]
+    revLog := record :: v.revLog
     nextLsn := v.nextLsn + 1
     epoch := v.epoch
   }
@@ -91,19 +96,21 @@ private def commitManyNow (db : DB) (batches : List (List Op)) : IO Unit := do
   if sameShard v.epoch.bounds ops = false then
     throw (IO.userError "cross-shard batch")
   let mut lsn := v.nextLsn
-  let mut recs : List Record := []
+  -- Newest of this group at the head. `++` below copies only this group.
+  let mut built : List Record := []
   for batchOps in batches do
     if batchOps.isEmpty then
       throw (IO.userError "empty batch")
     let some batch := Batch.ofList? batchOps
       | throw (IO.userError "batch too large")
-    recs := recs ++ [Record.ofBatch lsn batch]
+    built := Record.ofBatch lsn batch :: built
     lsn := lsn + 1
+  let recs := built.reverse
   appendFrame db.store (encodeLog recs)
   db.store.sync
   db.view.set {
     index := applyBatch v.index ops
-    log := v.log ++ recs
+    revLog := built ++ v.revLog
     nextLsn := lsn
     epoch := v.epoch
   }
@@ -147,7 +154,7 @@ private def compactNow (db : DB) : IO Unit := do
     match rs.getLast? with
     | some r => r.lsn + 1
     | none => v.nextLsn
-  db.view.set { v with log := rs, nextLsn := next }
+  db.view.set { v with revLog := rs.reverse, nextLsn := next }
 
 def DB.compact (db : DB) : IO Unit :=
   db.writer.atomically fun _ => liftM (compactNow db)
@@ -156,7 +163,7 @@ private def followNow (db : DB) (rpc : Rpc) : IO RpcReply := do
   if ← db.closed.get then
     throw (IO.userError "closed")
   let v ← db.view.get
-  let applied := applyRpc v.epoch.gen v.log rpc
+  let applied := applyRpc v.epoch.gen v.records rpc
   match applied.1 with
   | .ok _ =>
       match rpc with
@@ -174,7 +181,7 @@ private def followNow (db : DB) (rpc : Rpc) : IO RpcReply := do
         | none => 0
       db.view.set {
         index := replay applied.2
-        log := applied.2
+        revLog := applied.2.reverse
         nextLsn := next
         epoch := v.epoch
       }
@@ -202,7 +209,7 @@ private def adoptNow (db : DB) (epoch : Epoch) (records : List Record) : IO Unit
     | none => 0
   db.view.set {
     index := replay records
-    log := records
+    revLog := records.reverse
     nextLsn := next
     epoch := epoch
   }
@@ -249,7 +256,7 @@ def DB.openStore (store : Store) (epoch : Epoch := Epoch.single) : IO DB := do
     | none => 0
   let view ← IO.mkRef {
     index := replay rs
-    log := rs
+    revLog := rs.reverse
     nextLsn := next
     epoch := epoch
   }
@@ -258,8 +265,8 @@ def DB.openStore (store : Store) (epoch : Epoch := Epoch.single) : IO DB := do
   return { store, view, closed, writer := writer }
 
 def DB.openMem (epoch : Epoch := Epoch.single) : IO DB := do
-  let buf ← IO.mkRef ([] : Bytes)
-  DB.openStore (Store.mem buf) epoch
+  let chunks ← IO.mkRef ([] : List Bytes)
+  DB.openStore (Store.mem chunks) epoch
 
 def DB.openFile (path : FilePath) (epoch : Epoch := Epoch.single) : IO DB := do
   DB.openStore (← Store.openFile path) epoch

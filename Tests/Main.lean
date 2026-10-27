@@ -46,7 +46,7 @@ def expectPrefix (ents : List (FitBytes × FitBytes)) : IO Nat := do
   return sorted.length
 
 def testMem : IO Unit := do
-  let buf ← IO.mkRef ([] : Bytes)
+  let buf ← IO.mkRef ([] : List Bytes)
   let db ← DB.openStore (Store.mem buf)
   db.putStr "a" "1"
   check "get a" ((← db.getStr "a") == some "1")
@@ -81,14 +81,14 @@ def sampleCuts (n : Nat) : List Nat :=
   head ++ edges ++ [n]
 
 def testCrashCuts : IO Unit := do
-  let buf ← IO.mkRef ([] : Bytes)
+  let buf ← IO.mkRef ([] : List Bytes)
   let db ← DB.openStore (Store.mem buf)
   for i in [0:12] do
     db.putStr (toString i) "x"
-  let bytes ← buf.get
+  let bytes ← db.store.readAll
   check "full prefix" ((← expectPrefix (← db.iterate)) == 12)
   for cut in sampleCuts bytes.length do
-    let cutBuf ← IO.mkRef (bytes.take cut)
+    let cutBuf ← IO.mkRef [bytes.take cut]
     let db2 ← DB.openStore (Store.mem cutBuf)
     let n ← expectPrefix (← db2.iterate)
     check "cut grew the log" (n ≤ 12)
@@ -276,18 +276,18 @@ def testFault : IO Unit := do
   db.putStr "1" "b"
   st.store.append (← frameOf 50 "2" "c")
   let torn ← st.crash [.torn 10]
-  let tbuf ← IO.mkRef torn
+  let tbuf ← IO.mkRef [torn]
   let dbT ← DB.openStore (Store.mem tbuf)
   check "torn keeps synced" ((← expectPrefix (← dbT.iterate)) == 2)
   let kept ← st.crash [.keep]
-  let kbuf ← IO.mkRef kept
+  let kbuf ← IO.mkRef [kept]
   let dbK ← DB.openStore (Store.mem kbuf)
   let n ← expectPrefix (← dbK.iterate)
   check "kept tail is still a prefix" (n == 2 || n == 3)
   st.store.append (← frameOf 51 "3" "d")
   let holed ← st.crash [.zero, .keep]
   let bad ← try
-    let hbuf ← IO.mkRef holed
+    let hbuf ← IO.mkRef [holed]
     let _ ← DB.openStore (Store.mem hbuf)
     pure false
   catch e =>
@@ -322,12 +322,12 @@ def tally (counts : List (String × Nat)) (name : String) : List (String × Nat)
   counts.map fun p => if p.1 == name then (p.1, p.2 + 1) else p
 
 def testFuzz : IO Unit := do
-  let buf ← IO.mkRef ([] : Bytes)
+  let buf ← IO.mkRef ([] : List Bytes)
   let db ← DB.openStore (Store.mem buf)
   db.putStr "0" "a"
   db.putStr "1" "b"
   db.putStr "2" "c"
-  let bytes ← buf.get
+  let bytes ← db.store.readAll
   let orig ← db.readLog
   let mut counts : List (String × Nat) := [("detect", 0), ("torn", 0), ("miss", 0), ("forge", 0), ("same", 0)]
   -- Every bit of the header checksum region and the first segment header.
