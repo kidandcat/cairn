@@ -1,5 +1,8 @@
 import Cairn.DB
 import Cairn.Cluster
+import Cairn.Directory
+import Cairn.ShardModel
+import Cairn.ShardSet
 import Cairn.Snapshot
 import Cairn.Crash
 import Cairn.Sum32Thm

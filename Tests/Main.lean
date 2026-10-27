@@ -353,6 +353,165 @@ def testFuzz : IO Unit := do
   check "fuzz missed a flip" ((counts.lookup "miss") == some 0)
   check "fuzz forged a record" ((counts.lookup "forge") == some 0)
 
+def fk (shard i : Nat) (tag : UInt8) : FitBytes where
+  bytes := [UInt8.ofNat shard, UInt8.ofNat i, tag]
+  hlen := by
+    rw [List.length_cons, List.length_cons, List.length_cons, List.length_nil]
+    decide
+
+def isSorted : List (FitBytes × FitBytes) → Bool
+  | [] => true
+  | [_] => true
+  | a :: b :: rest => keyLe a b && isSorted (b :: rest)
+
+def hasKey (es : List (FitBytes × FitBytes)) (b : Bytes) : Bool :=
+  es.any fun e => e.1.bytes == b && e.2.bytes == b
+
+/-- A visible tag from a pair means the whole pair is in this snapshot. -/
+def pairsOk (es : List (FitBytes × FitBytes)) : Bool :=
+  es.all fun e =>
+    match e.1.bytes with
+    | [s, i, _] => hasKey es [s, i, 1] && hasKey es [s, i, 2] && e.2.bytes == e.1.bytes
+    | _ => false
+
+def testShardSet : IO Unit := do
+  let bounds : List Bytes := ["n".toUTF8.toList]
+  let epoch : Epoch := { gen := 1, bounds := bounds }
+  let s ← ShardSet.openMem epoch
+  for k in ["a", "b", "m", "z"] do
+    s.putStr k k
+    let id ← s.shardId (← mustFit k)
+    check s!"route {k}" (id == shardOf bounds (← mustFit k).bytes)
+  check "a home" ((← s.shardId (← mustFit "a")) == 0)
+  check "z home" ((← s.shardId (← mustFit "z")) == 1)
+  let crossed ← try
+    s.commit [.put (← mustFit "a") (← mustFit "a"), .put (← mustFit "z") (← mustFit "z")]
+    pure false
+  catch _ => pure true
+  check "set cross-shard rejected" crossed
+  let empty ← try
+    s.commit []
+    pure false
+  catch _ => pure true
+  check "set empty rejected" empty
+  let log0 ← s.readLog 0
+  let log1 ← s.readLog 1
+  check "shard 0 keeps its hist" (Cairn.get (replay log0) (← mustFit "a") == some (← mustFit "a"))
+  check "z not in shard 0" (Cairn.get (replay log0) (← mustFit "z") == none)
+  check "shard 1 keeps its hist" (Cairn.get (replay log1) (← mustFit "z") == some (← mustFit "z"))
+  check "a not in shard 1" (Cairn.get (replay log1) (← mustFit "a") == none)
+  let merged := mergeAll [← s.localEntries 0, ← s.localEntries 1]
+  let got ← s.iterate
+  check "iterate is the merge" (got == merged)
+  check "iterate sorted" (isSorted got)
+  let view ← s.hostView
+  check "host serves both" (view.serving == [0, 1])
+  let before ← s.directory.get
+  s.publish (ShardOwner.primary 0 { n := 0 } [{ shard := 0, replica := 1 }])
+  let after ← s.directory.get
+  check "publish bumps gen" (after.gen == before.gen + 1)
+  check "publish keeps the leader" ((after.owner? 0).map (·.host) == some { n := 0 })
+  let h0 ← ShardSet.openHosted epoch { n := 0 } [0]
+  let h1 ← ShardSet.openHosted epoch { n := 1 } [1]
+  let owners := [ShardOwner.primary 0 { n := 0 }, ShardOwner.primary 1 { n := 1 }]
+  h0.directory.set { gen := 2, owners := owners }
+  h1.directory.set { gen := 2, owners := owners }
+  h0.remote.set fun dst req => h1.serve dst.shard req
+  h1.remote.set fun dst req => h0.serve dst.shard req
+  h0.putStr "a" "va"
+  h0.putStr "z" "vz"
+  check "remote put landed" ((← h1.getStr "z") == some "vz")
+  check "local read of remote" ((← h0.getStr "z") == some "vz")
+  check "remote read of local" ((← h1.getStr "a") == some "va")
+  let remoteIter ← h0.iterate
+  check "remote iterate length" (remoteIter.length == 2)
+  check "remote iterate sorted" (isSorted remoteIter)
+  let leader ← ShardSet.openMem Epoch.single
+  leader.putStr "k" "v"
+  let follower ← DB.openMem Epoch.single
+  let box ← InProc.new
+  let emptyRep : Replica := { epochGen := 0, log := [] }
+  leader.pushLog box.mailbox 0 emptyRep { shard := 0, replica := 1 }
+  let msgs ← box.drain { shard := 0, replica := 1 }
+  check "catch-up mailed" (msgs.length == 1)
+  for rpc in msgs do
+    let reply ← follower.follow rpc
+    check "follower applied" (reply == .ok 1)
+  check "follower has k" ((← follower.getStr "k") == some "v")
+  let mismatched ← try
+    leader.pushLog box.mailbox 0 { epochGen := 9, log := [] } { shard := 0, replica := 1 }
+    pure false
+  catch _ => pure true
+  check "epoch mismatch sends nothing" mismatched
+
+def testShardFiles : IO Unit := do
+  let dir ← IO.FS.createTempDir
+  try
+    let bounds : List Bytes := ["n".toUTF8.toList]
+    let epoch : Epoch := { gen := 1, bounds := bounds }
+    let s ← ShardSet.openFiles dir epoch
+    s.putStr "a" "a"
+    s.putStr "b" "b"
+    s.putStr "z" "z"
+    let t0 ← IO.asTask (prio := .dedicated) do
+      for i in [0:4] do
+        s.putStr s!"a{i}" "v"
+    let t1 ← IO.asTask (prio := .dedicated) do
+      for i in [0:4] do
+        s.putStr s!"z{i}" "v"
+    match ← IO.wait t0 with
+    | .ok () => pure ()
+    | .error e => throw e
+    match ← IO.wait t1 with
+    | .ok () => pure ()
+    | .error e => throw e
+    s.close
+    let path0 := dir.toString ++ "/shard-0.cairn"
+    let raw ← IO.FS.readBinFile path0
+    check "shard file has a header" (raw.size ≥ 4096)
+    IO.FS.writeBinFile path0 (raw.extract 0 4096)
+    let s2 ← ShardSet.openFiles dir epoch
+    check "crashed shard dropped its tail" ((← s2.getStr "a") == none)
+    check "other shard kept z" ((← s2.getStr "z") == some "z")
+    check "other shard kept z0" ((← s2.getStr "z0") == some "v")
+    s2.close
+  finally
+    IO.FS.removeDirAll dir
+
+def testShardStress : IO Unit := do
+  let bounds : List Bytes := [[1], [2], [3]]
+  let epoch : Epoch := { gen := 0, bounds := bounds }
+  let s ← ShardSet.openMem epoch
+  let mut tasks : List (Task (Except IO.Error Unit)) := []
+  for shard in [0:4] do
+    let t ← IO.asTask (prio := .dedicated) do
+      for i in [0:20] do
+        s.commit [.put (fk shard i 1) (fk shard i 1), .put (fk shard i 2) (fk shard i 2)]
+    tasks := t :: tasks
+  for _ in [0:2] do
+    let t ← IO.asTask (prio := .dedicated) do
+      for _ in [0:15] do
+        let es ← s.iterate
+        check "live merge sorted" (isSorted es)
+        for shard in [0:4] do
+          check "live pair" (pairsOk (← s.localEntries shard))
+    tasks := t :: tasks
+  for t in tasks do
+    match ← IO.wait t with
+    | .ok () => pure ()
+    | .error e => throw e
+  let mut parts : List (List (FitBytes × FitBytes)) := []
+  for shard in [0:4] do
+    let es ← s.localEntries shard
+    check "final pair" (pairsOk es)
+    check s!"shard count {shard}" (es.length == 40)
+    parts := parts ++ [es]
+    for i in [0:20] do
+      let id ← s.shardId (fk shard i 1)
+      check "stress route" (id == shardOf bounds (fk shard i 1).bytes)
+  check "stress iterate is the merge" ((← s.iterate) == mergeAll parts)
+  check "stress iterate sorted" (isSorted (← s.iterate))
+
 def main : IO UInt32 := do
   testMem
   testCrashCuts
@@ -361,5 +520,8 @@ def main : IO UInt32 := do
   testConcurrent
   testFault
   testFuzz
+  testShardSet
+  testShardFiles
+  testShardStress
   IO.println "cairn tests ok"
   return 0
