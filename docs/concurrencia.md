@@ -1,6 +1,16 @@
 # Escritores concurrentes en cairn: comparación de diseños
 
-Documento de decisión. No implementa escritores concurrentes. `main` sigue con un escritor por `DB` (`Std.Mutex` por base, lecturas de una `View` inmutable). Esta rama solo añade este texto y el microbenchmark que lo alimenta (`Bench/Design.lean`, ejecutable `cairn-design-bench`). Ese ejecutable no entra en `lake test`.
+## Decisión
+
+El owner implementa **B ahora**: un escritor por shard, sin mutex global. Cada shard sigue siendo el diseño A (un mutex, un log, un `sync`). **C** (OCC serializable dentro del shard, con conjuntos de lectura y de escritura) solo si un shard se queda corto. No se implementan D, E ni varios escritores del mismo shard.
+
+Esa fase está en el PR del `ShardSet` (`cursor/shard-writer-35e9`), con el informe en `docs/shards.md`. Este PR no se mergea como código: `Bench/Design.lean` de esta rama es el arnés anterior, el de `Handle.flush`, y no debe sustituir al `cairn-design-bench` de `main`, que mide el router con `fdatasync`. El texto de abajo sigue siendo la comparación que llevó a la decisión.
+
+Las cifras de las tablas son de antes del `fdatasync` (PR #2). Miden `flush`, no una barrera de disco. Los números con `sync` real están en el README de `main` y en `docs/shards.md`. No se rehacen aquí y no se promedian con aquellas.
+
+## Qué era este documento
+
+Documento de decisión. No implementa escritores concurrentes. Cuando se escribió, `main` tenía un escritor por `DB` (`Std.Mutex` por base, lecturas de una `View` inmutable). Esta rama añade este texto y el microbenchmark que lo alimentó (`Bench/Design.lean`). Ese ejecutable no entra en `lake test`.
 
 Cada cifra de abajo es una de dos cosas:
 
@@ -21,7 +31,7 @@ Un `DB` es un log, un índice en memoria y un `Std.Mutex Unit`. `DB.commit` entr
 
 El orden de admisión del mutex es el orden serial del modelo `Cairn.Hist` (`Cairn/Snapshot.lean`): `state_eq_serial` y `snapshot_stable`. Ese fichero no formaliza el modelo de memoria de C++. El README lo dice. Esta comparación no lo cambia.
 
-`Store.sync` en fichero es `Handle.flush`. En memoria es `pure ()`. Lean 4.35 no tiene `fsync`. Un `flush` sobrevivió a `kill -9` en el demo ya publicado (una ejecución: 268 claves, un prefijo). Un corte de alimentación no está cubierto.
+`Store.sync` en el código que midió este documento era `Handle.flush`. En memoria es `pure ()`. Lean 4.35 no tiene `fsync` en el runtime: el PR #2 lo añadió con un shim C, y esa barrera no está en las tablas de abajo. Un `flush` sobrevivió a `kill -9` en el demo ya publicado (una ejecución: 268 claves, un prefijo). Un corte de alimentación no está cubierto. El `kill -9` de después del shim recuperó 147 claves en otra ejecución; tampoco es un corte de luz.
 
 El índice es una lista asociativa (`Cairn/Map.lean`): `insert` recorre la lista. El log en memoria del `DB` es `v.log ++ [record]` en cada commit (copia la espina). El backend de memoria, además, hace `buf.modify (· ++ b)` y copia **todos** los bytes del log en cada append (`Cairn/Store.lean`). `Ref.modify` está `implemented_by` un `take`/`put` unsafe; el backend de memoria usa eso. El de fichero escribe el `ByteArray` en el descriptor.
 
