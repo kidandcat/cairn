@@ -358,19 +358,6 @@ theorem decodeRecord_prefix (r : Record) (n : Nat) (hn : n < (encodeRecord r).le
 def encodeLog (rs : List Record) : Bytes :=
   rs.flatMap encodeRecord
 
-/-- `CAIR` + version 1. -/
-def fileMagic : Bytes := [67, 65, 73, 82]
-
-def fileVersion : UInt32 := 1
-
-def fileHeader : Bytes := fileMagic ++ writeU32 fileVersion
-
-theorem fileHeader_length : fileHeader.length = 8 := by
-  simp [fileHeader, fileMagic, writeU32_length]
-
-def encodeFile (rs : List Record) : Bytes :=
-  fileHeader ++ encodeLog rs
-
 def decodeGo : Nat → Bytes → List Record
   | 0, _ => []
   | fuel + 1, bs =>
@@ -457,64 +444,6 @@ theorem decodeGo_prefix : ∀ (fuel : Nat) (rs : List Record) (bs : Bytes),
         · simp [List.length_cons]
           omega
         simp [hkdec, List.take_succ_cons]
-
-/--
-Files shorter than the header decode as an empty log (a torn header is an empty
-prefix). A longer file whose header is not `CAIR`/version 1 is rejected.
--/
-def decodeFile (bs : Bytes) : Except String (List Record) :=
-  if bs.length < fileHeader.length then
-    .ok []
-  else if bs.take fileHeader.length != fileHeader then
-    .error "not a cairn file"
-  else
-    .ok (decodeLog (bs.drop fileHeader.length))
-
-theorem decodeFile_encode (rs : List Record) : decodeFile (encodeFile rs) = .ok rs := by
-  have hnot : ¬ (encodeFile rs).length < fileHeader.length := by
-    simp [encodeFile, fileHeader_length, List.length_append]
-  rw [decodeFile, ite_eq_right hnot]
-  have heq : (encodeFile rs).take fileHeader.length = fileHeader := by
-    simp [encodeFile, fileHeader_length]
-  have hkeep : ((encodeFile rs).take fileHeader.length != fileHeader) = false := by
-    simp [heq]
-  rw [hkeep, ite_eq_right (by decide)]
-  simp [encodeFile, fileHeader_length, decodeLog_encode]
-
-theorem decodeFile_prefix (rs : List Record) (n : Nat) :
-    ∃ k, decodeFile ((encodeFile rs).take n) = .ok (rs.take k) := by
-  by_cases hlt : n < fileHeader.length
-  · have hshort : ((encodeFile rs).take n).length < fileHeader.length := by
-      have hfull : fileHeader.length ≤ (encodeFile rs).length := by
-        simp [encodeFile, fileHeader_length, List.length_append]
-      simp [List.length_take, Nat.min_eq_left (Nat.le_trans (Nat.le_of_lt hlt) hfull)]
-      exact hlt
-    refine ⟨0, ?_⟩
-    rw [decodeFile, ite_eq_left hshort, List.take_zero]
-  · have hge : fileHeader.length ≤ n := by omega
-    have htake : (encodeFile rs).take n =
-        fileHeader ++ (encodeLog rs).take (n - fileHeader.length) := by
-      simp only [encodeFile]
-      rw [List.take_append, List.take_of_length_le hge]
-    have hlen : fileHeader.length ≤ ((encodeFile rs).take n).length := by
-      simp [htake, fileHeader_length, List.length_append]
-    have hhead : ((encodeFile rs).take n).take fileHeader.length = fileHeader := by
-      simp [htake, fileHeader_length]
-    have hdrop : ((encodeFile rs).take n).drop fileHeader.length =
-        (encodeLog rs).take (n - fileHeader.length) := by
-      simp [htake, fileHeader_length]
-    obtain ⟨k, hk, hdec⟩ := decodeGo_prefix
-      ((encodeLog rs).take (n - fileHeader.length)).length rs
-      ((encodeLog rs).take (n - fileHeader.length))
-      (Nat.le_refl _) ⟨n - fileHeader.length, rfl⟩
-    refine ⟨k, ?_⟩
-    have hnot : ¬ ((encodeFile rs).take n).length < fileHeader.length := Nat.not_lt_of_ge hlen
-    rw [decodeFile, ite_eq_right hnot]
-    have hkeep : (((encodeFile rs).take n).take fileHeader.length != fileHeader) = false := by
-      simp [hhead, bne]
-    rw [hkeep, ite_eq_right (by decide), hdrop]
-    simp only [decodeLog]
-    exact congrArg Except.ok hdec
 
 instance : LawfulBEq FitBytes where
   rfl {a} := by simpa [BEq.beq] using (@BEq.rfl (List UInt8) _ _ a.bytes)

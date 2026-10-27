@@ -4,5 +4,6 @@
 *.olean
 *.ilean
 *.c
+!native/*.c
 *.o
 /tmp-cairn

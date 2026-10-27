@@ -7,7 +7,8 @@ atomic, so a reader sees the old view or the new one.
 
 The writer mutex admits one commit at a time. Admission order is the serial
 order of `Snapshot.Hist`. The lock is not re-entrant. The view is published
-only after `append` and `sync`.
+only after `append` and `sync`. On the file backend `sync` is a data barrier
+(`fdatasync` / `F_FULLFSYNC`), not `Handle.flush`.
 
 A batch is one record, and it must sit in a single shard (`sameShard`). An
 empty batch is rejected. There is no cross-shard transaction.
@@ -53,6 +54,11 @@ def DB.readLog (db : DB) : IO (List Record) := do
 def DB.readEpoch (db : DB) : IO Epoch := do
   return (← db.snapshot).epoch
 
+private def appendFrame (store : Store) (payload : Bytes) : IO Unit := do
+  if payload.length ≥ UInt32.size then
+    throw (IO.userError "record does not fit")
+  store.append (encodeFrame segMagic payload)
+
 private def commitNow (db : DB) (ops : List Op) : IO Unit := do
   if ← db.closed.get then
     throw (IO.userError "closed")
@@ -64,7 +70,7 @@ private def commitNow (db : DB) (ops : List Op) : IO Unit := do
   if sameShard v.epoch.bounds ops = false then
     throw (IO.userError "cross-shard batch")
   let record : Record := Record.ofBatch v.nextLsn batch
-  db.store.append (encodeRecord record)
+  appendFrame db.store (encodeRecord record)
   db.store.sync
   db.view.set {
     index := applyBatch v.index ops
@@ -73,8 +79,41 @@ private def commitNow (db : DB) (ops : List Op) : IO Unit := do
     epoch := v.epoch
   }
 
+private def commitManyNow (db : DB) (batches : List (List Op)) : IO Unit := do
+  if ← db.closed.get then
+    throw (IO.userError "closed")
+  if batches.isEmpty then
+    throw (IO.userError "empty batch")
+  let ops := batches.flatten
+  if ops.isEmpty then
+    throw (IO.userError "empty batch")
+  let v ← db.view.get
+  if sameShard v.epoch.bounds ops = false then
+    throw (IO.userError "cross-shard batch")
+  let mut lsn := v.nextLsn
+  let mut recs : List Record := []
+  for batchOps in batches do
+    if batchOps.isEmpty then
+      throw (IO.userError "empty batch")
+    let some batch := Batch.ofList? batchOps
+      | throw (IO.userError "batch too large")
+    recs := recs ++ [Record.ofBatch lsn batch]
+    lsn := lsn + 1
+  appendFrame db.store (encodeLog recs)
+  db.store.sync
+  db.view.set {
+    index := applyBatch v.index ops
+    log := v.log ++ recs
+    nextLsn := lsn
+    epoch := v.epoch
+  }
+
 def DB.commit (db : DB) (ops : List Op) : IO Unit :=
   db.writer.atomically fun _ => liftM (commitNow db ops)
+
+/-- Several batches, one segment, one `sync`. A crash drops the whole group or keeps it. -/
+def DB.commitMany (db : DB) (batches : List (List Op)) : IO Unit :=
+  db.writer.atomically fun _ => liftM (commitManyNow db batches)
 
 def DB.put (db : DB) (k v : FitBytes) : IO Unit :=
   db.commit [.put k v]
@@ -122,9 +161,11 @@ private def followNow (db : DB) (rpc : Rpc) : IO RpcReply := do
   | .ok _ =>
       match rpc with
       | .appendEntries _ _ entries =>
-          for r in entries do
-            db.store.append (encodeRecord r)
-          db.store.sync
+          if entries.isEmpty then
+            pure ()
+          else
+            appendFrame db.store (encodeLog entries)
+            db.store.sync
       | .installSnapshot _ _ =>
           db.store.replaceAll (encodeFile applied.2)
       let next :=
@@ -191,13 +232,17 @@ def DB.close (db : DB) : IO Unit :=
 
 def DB.openStore (store : Store) (epoch : Epoch := Epoch.single) : IO DB := do
   let bytes ← store.readAll
+  let s := scan bytes
   let rs ←
-    match decodeFile bytes with
-    | .ok rs => pure rs
-    | .error msg => throw (IO.userError msg)
-  let canon := encodeFile rs
-  if bytes != canon then
-    store.replaceAll canon
+    match s.kind with
+    | .reject => throw (IO.userError "not a cairn file")
+    | .corrupt => throw (IO.userError "corrupt log")
+    | .clean => pure s.records
+    | .torn =>
+        let kept := if s.consumed = 0 then encodeHeader else bytes.take s.consumed
+        if bytes != kept then
+          store.replaceAll kept
+        pure s.records
   let next : UInt64 :=
     match rs.getLast? with
     | some r => r.lsn + 1
@@ -218,5 +263,14 @@ def DB.openMem (epoch : Epoch := Epoch.single) : IO DB := do
 
 def DB.openFile (path : FilePath) (epoch : Epoch := Epoch.single) : IO DB := do
   DB.openStore (← Store.openFile path) epoch
+
+/--
+Open a file, truncating a torn tail or a mid-log corruption to the last
+valid prefix. A file that is not a cairn file is left in place and the call
+fails. `openFile` itself does not repair: corruption is an error.
+-/
+def DB.openFileRepair (path : FilePath) (epoch : Epoch := Epoch.single) : IO DB := do
+  Store.repairFile path
+  DB.openFile path epoch
 
 end Cairn
