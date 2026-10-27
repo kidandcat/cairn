@@ -29,9 +29,9 @@ def Replica.truncate (r : Replica) (n : Nat) : Replica :=
 def Replica.crashBytes (r : Replica) (n : Nat) : Except String Replica :=
   Except.map (fun log => { r with log := log }) (decodeFile ((encodeFile r.log).take n))
 
-theorem crash_is_prefix (r : Replica) (n : Nat) :
+theorem crash_is_prefix (r : Replica) (n : Nat) (h : RecordsFit r.log) :
     ∃ k, Except.map Replica.state (r.crashBytes n) = .ok (replay (r.log.take k)) := by
-  obtain ⟨k, hk⟩ := recovery_prefix r.log n
+  obtain ⟨k, hk⟩ := recovery_prefix r.log n h
   refine ⟨k, ?_⟩
   simp only [Replica.crashBytes]
   have hmap :

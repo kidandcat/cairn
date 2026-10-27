@@ -7,6 +7,8 @@ it yields a prefix of the committed records.
 -/
 
 import Cairn.Record
+import Cairn.FileFmt
+import Cairn.FileFmtThm
 import Cairn.Map
 
 namespace Cairn
@@ -152,13 +154,14 @@ theorem compact_roundtrip (m : Map) (h : NodupKeys m) (start : UInt64) :
 /-! ## Crash as a byte prefix -/
 
 /--
-Decoding a prefix of an encoded log is the replay of some prefix of the
-committed records. A torn record is dropped whole; a batch is not split.
+Decoding a prefix of an encoded file replays some prefix of the records.
+Whole frames are kept. A frame that does not fit is dropped, not split.
+`RecordsFit` excludes a payload that does not fit in the `UInt32` length.
 -/
-theorem recovery_prefix (rs : List Record) (n : Nat) :
+theorem recovery_prefix (rs : List Record) (n : Nat) (h : RecordsFit rs) :
     ∃ k, Except.map replay (decodeFile ((encodeFile rs).take n)) =
       .ok (replay (rs.take k)) := by
-  obtain ⟨k, hk⟩ := decodeFile_prefix rs n
+  obtain ⟨k, hk⟩ := decodeFile_prefix rs n h
   refine ⟨k, ?_⟩
   rw [hk]
   simp [Except.map]

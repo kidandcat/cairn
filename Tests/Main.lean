@@ -73,6 +73,13 @@ def testMem : IO Unit := do
   check "compact z" ((← db2.getStr "z") == some "9")
   check "compact a gone" ((← db2.getStr "a") == none)
 
+/-- Cuts the proof covers every index of. The test checks the header, frame edges, and a stride. -/
+def sampleCuts (n : Nat) : List Nat :=
+  let head := List.range (min n 80)
+  let edges := (List.range (n / 4096 + 2)).flatMap fun i =>
+    [min n (i * 4096), min n (i * 4096 + 17), min n (i * 4096 + 40)]
+  head ++ edges ++ [n]
+
 def testCrashCuts : IO Unit := do
   let buf ← IO.mkRef ([] : Bytes)
   let db ← DB.openStore (Store.mem buf)
@@ -80,7 +87,7 @@ def testCrashCuts : IO Unit := do
     db.putStr (toString i) "x"
   let bytes ← buf.get
   check "full prefix" ((← expectPrefix (← db.iterate)) == 12)
-  for cut in [0:bytes.length + 1] do
+  for cut in sampleCuts bytes.length do
     let cutBuf ← IO.mkRef (bytes.take cut)
     let db2 ← DB.openStore (Store.mem cutBuf)
     let n ← expectPrefix (← db2.iterate)
@@ -122,8 +129,27 @@ def testFile : IO Unit := do
     check "bad magic rejected" rejected
     let short := FilePath.mk (dir.toString ++ "/short")
     IO.FS.writeBinFile short "HI".toUTF8
-    let db4 ← DB.openFile short
-    check "torn header is empty" ((← db4.iterate).isEmpty)
+    let rejectedShort ← try
+      let _ ← DB.openFile short
+      pure false
+    catch _ =>
+      pure true
+    check "non-prefix short rejected" rejectedShort
+    let pref := FilePath.mk (dir.toString ++ "/pref")
+    IO.FS.writeBinFile pref (encodeHeader.take 3).toByteArray
+    let db4 ← DB.openFile pref
+    check "header prefix is empty" ((← db4.iterate).isEmpty)
+    db4.close
+    let gpath := FilePath.mk (dir.toString ++ "/group")
+    let gdb ← DB.openFile gpath
+    gdb.commitMany [[.put (← mustFit "0") (← mustFit "a")],
+      [.put (← mustFit "1") (← mustFit "b")]]
+    gdb.close
+    let gbytes ← IO.FS.readBinFile gpath
+    check "group commit is one segment" (gbytes.size == 8192)
+    let gdb2 ← DB.openFile gpath
+    check "group 0" ((← gdb2.getStr "0") == some "a")
+    check "group 1" ((← gdb2.getStr "1") == some "b")
   finally
     IO.FS.removeDirAll dir
 
@@ -177,7 +203,7 @@ def testRouterAndReplicas : IO Unit := do
   for n in [0:log0.length + 1] do
     check "truncate catch-up" ((catchUp (leader.truncate n) leader).state == leader.state)
   let enc := encodeFile log0
-  for n in [0:enc.length + 1] do
+  for n in sampleCuts enc.length do
     match leader.crashBytes n with
     | .error msg => throw (IO.userError s!"prefix rejected: {msg}")
     | .ok f =>
@@ -239,11 +265,101 @@ def testConcurrent : IO Unit := do
   check "final pair" ((← db.getStr "1-19a") == some "1-19a")
   check "final pair b" ((← db.getStr "0-0b") == some "0-0b")
 
+def frameOf (lsn : UInt64) (k v : String) : IO Bytes := do
+  let recd := Record.ofBatch lsn (Batch.single (.put (← mustFit k) (← mustFit v)))
+  return encodeFrame segMagic (encodeRecord recd)
+
+def testFault : IO Unit := do
+  let st ← FaultState.new
+  let db ← DB.openStore st.store
+  db.putStr "0" "a"
+  db.putStr "1" "b"
+  st.store.append (← frameOf 50 "2" "c")
+  let torn ← st.crash [.torn 10]
+  let tbuf ← IO.mkRef torn
+  let dbT ← DB.openStore (Store.mem tbuf)
+  check "torn keeps synced" ((← expectPrefix (← dbT.iterate)) == 2)
+  let kept ← st.crash [.keep]
+  let kbuf ← IO.mkRef kept
+  let dbK ← DB.openStore (Store.mem kbuf)
+  let n ← expectPrefix (← dbK.iterate)
+  check "kept tail is still a prefix" (n == 2 || n == 3)
+  st.store.append (← frameOf 51 "3" "d")
+  let holed ← st.crash [.zero, .keep]
+  let bad ← try
+    let hbuf ← IO.mkRef holed
+    let _ ← DB.openStore (Store.mem hbuf)
+    pure false
+  catch e =>
+    pure (e.toString == "corrupt log")
+  check "hole then valid frame is corrupt" bad
+
+def xorByte (bs : Bytes) (i : Nat) (mask : UInt8) : Bytes :=
+  bs.take i ++
+    match bs.drop i with
+    | [] => []
+    | b :: rest => (b ^^^ mask) :: rest
+
+def flipBit (bs : Bytes) (bit : Nat) : Bytes :=
+  xorByte bs (bit / 8) (1 <<< (bit % 8).toUInt8)
+
+def lcg (s : UInt64) : UInt64 :=
+  s * 6364136223846793005 + 1
+
+/-- `detect` / `torn` keep a prefix or refuse the file. `miss` accepts altered bytes unchanged. -/
+def classFlip (orig : List Record) (origBytes altered : Bytes) : String :=
+  let s := scan altered
+  match s.kind with
+  | .corrupt | .reject => "detect"
+  | .torn => if s.records.isPrefixOf orig then "torn" else "forge"
+  | .clean =>
+      if altered == origBytes then "same"
+      else if s.records == orig then "miss"
+      else if s.records.isPrefixOf orig then "torn"
+      else "forge"
+
+def tally (counts : List (String × Nat)) (name : String) : List (String × Nat) :=
+  counts.map fun p => if p.1 == name then (p.1, p.2 + 1) else p
+
+def testFuzz : IO Unit := do
+  let buf ← IO.mkRef ([] : Bytes)
+  let db ← DB.openStore (Store.mem buf)
+  db.putStr "0" "a"
+  db.putStr "1" "b"
+  db.putStr "2" "c"
+  let bytes ← buf.get
+  let orig ← db.readLog
+  let mut counts : List (String × Nat) := [("detect", 0), ("torn", 0), ("miss", 0), ("forge", 0), ("same", 0)]
+  -- Every bit of the header checksum region and the first segment header.
+  for bit in [0:64 * 8] do
+    counts := tally counts (classFlip orig bytes (flipBit bytes bit))
+  for bit in [0:96 * 8] do
+    counts := tally counts (classFlip orig bytes (flipBit bytes (4096 * 8 + bit)))
+  -- A bit in the first segment, with two valid segments after it, is mid-log damage.
+  let mid := scan (flipBit bytes (4096 * 8 + 16 * 8))
+  check "mid-log bit is corrupt" (mid.kind == .corrupt)
+  let mut state : UInt64 := 0xC0FFEE
+  for _ in [0:200] do
+    state := lcg state
+    let bit := state.toNat % (bytes.length * 8)
+    counts := tally counts (classFlip orig bytes (flipBit bytes bit))
+  for _ in [0:200] do
+    state := lcg state
+    let i := state.toNat % bytes.length
+    state := lcg state
+    let mask := UInt8.ofNat (state.toNat % 255 + 1)
+    counts := tally counts (classFlip orig bytes (xorByte bytes i mask))
+  IO.println s!"fuzz {counts}"
+  check "fuzz missed a flip" ((counts.lookup "miss") == some 0)
+  check "fuzz forged a record" ((counts.lookup "forge") == some 0)
+
 def main : IO UInt32 := do
   testMem
   testCrashCuts
   testFile
   testRouterAndReplicas
   testConcurrent
+  testFault
+  testFuzz
   IO.println "cairn tests ok"
   return 0

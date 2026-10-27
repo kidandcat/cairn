@@ -1,18 +1,25 @@
 /-
 Byte storage. The core never sees a file descriptor.
 
-`append` and `replaceAll` are the only writers. `sync` pushes buffered writes as far
-as the backend can: the memory backend is a no-op, the file backend calls
-`Handle.flush`. Lean 4.35 has no `fsync`, so a flushed file survives `kill -9`
-(the kernel page cache) and is not a power-loss barrier.
+`sync` contract. After `sync` returns, every `append` and `replaceAll` since the
+previous successful `sync` survives a power loss. Bytes not covered by a
+completed `sync` may be absent, reordered, or torn on a `blockSize` boundary,
+including a sector that keeps only a prefix of its new contents. The caller
+acknowledges a commit only after `sync` returns.
 
-Compaction writes a temp file, flushes it, drops that handle, then `rename`s it
-over the live path. The append handle is cleared before the rename so it does
-not keep the old inode.
+The memory backend's `sync` is not a disk: it returns immediately and the
+bytes are only in the `IO.Ref`. The file backend's `sync` is `fdatasync` on
+Linux and `F_FULLFSYNC` (falling back to `fsync`) on macOS. `replaceAll`
+writes a new file, data-syncs it, renames it onto the target, and fsyncs the
+parent directory before it returns. A crash before the rename leaves the
+previous file. A crash after the rename but before the directory fsync can
+show either name; both files were data-synced, so either image is a complete
+cairn file.
 -/
 
 import Cairn.Bytes
-import Cairn.Record
+import Cairn.FileFmt
+import Cairn.Posix
 
 open System
 
@@ -30,37 +37,64 @@ def Store.mem (buf : IO.Ref Bytes) : Store where
   sync := pure ()
   replaceAll := buf.set
 
-/-- Write `bytes` to a temp file and rename it onto `path`. The temp handle does not escape. -/
-def writeAside (path : FilePath) (bytes : Bytes) : IO Unit := do
-  let tmp := FilePath.mk (path.toString ++ ".cairn-tmp")
-  let h ← IO.FS.Handle.mk tmp .write
-  h.write bytes.toByteArray
-  h.flush
+/-- Data-sync `bytes` into a temp file, rename it onto `path`, fsync the directory. -/
+def writeDurable (path : FilePath) (bytes : Bytes) : IO Unit := do
+  let tmp := path.toString ++ ".cairn-tmp"
+  let fd ← Posix.openTrunc tmp
+  Posix.write fd bytes.toByteArray
+  Posix.datasync fd
+  Posix.closeFd fd
   IO.FS.rename tmp path
+  Posix.syncDir path.toString
 
-def Store.file (path : FilePath) (handle : IO.Ref (Option IO.FS.Handle)) : Store where
+def Store.file (path : FilePath) (fdRef : IO.Ref (Option UInt32)) : Store where
   readAll := do
     return (← IO.FS.readBinFile path).toList
   append b := do
-    match ← handle.get with
-    | some h => h.write b.toByteArray
+    match ← fdRef.get with
+    | some fd => Posix.write fd b.toByteArray
     | none => throw (IO.userError "store has no append handle")
   sync := do
-    match ← handle.get with
-    | some h => h.flush
+    match ← fdRef.get with
+    | some fd => Posix.datasync fd
     | none => pure ()
   replaceAll b := do
-    handle.set none
-    writeAside path b
-    let h ← IO.FS.Handle.mk path .append
-    handle.set (some h)
+    match ← fdRef.get with
+    | some fd =>
+        Posix.closeFd fd
+        fdRef.set none
+    | none => pure ()
+    writeDurable path b
+    let fd ← Posix.openAppend path.toString
+    fdRef.set (some fd)
 
 def Store.openFile (path : FilePath) : IO Store := do
   if !(← path.pathExists) then
-    let h ← IO.FS.Handle.mk path .write
-    h.write (encodeFile []).toByteArray
-    h.flush
-  let handle ← IO.mkRef (some (← IO.FS.Handle.mk path .append))
-  return Store.file path handle
+    let fd ← Posix.openTrunc path.toString
+    Posix.write fd encodeHeader.toByteArray
+    Posix.datasync fd
+    Posix.closeFd fd
+    Posix.syncDir path.toString
+  let fd ← Posix.openAppend path.toString
+  let fdRef ← IO.mkRef (some fd)
+  return Store.file path fdRef
+
+/--
+Rewrite a torn or mid-log-corrupt file down to the scanned prefix, durably.
+A foreign file (`.reject`) is left untouched and reported. A clean file is
+not rewritten.
+-/
+def Store.repairFile (path : FilePath) : IO Unit := do
+  if !(← path.pathExists) then
+    return
+  let bytes := (← IO.FS.readBinFile path).toList
+  let s := scan bytes
+  match s.kind with
+  | .reject => throw (IO.userError "not a cairn file")
+  | .clean => pure ()
+  | .torn | .corrupt =>
+      let kept := if s.consumed = 0 then encodeHeader else bytes.take s.consumed
+      if bytes != kept then
+        writeDurable path kept
 
 end Cairn
