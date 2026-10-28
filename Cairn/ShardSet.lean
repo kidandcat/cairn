@@ -29,6 +29,7 @@ import Cairn.DB
 import Cairn.Directory
 import Cairn.Feed
 import Cairn.ShardModel
+import Std.Sync.Channel
 
 open System
 
@@ -47,6 +48,8 @@ structure ShardSet where
   slots : Array (Option DB)
   remote : IO.Ref (NodeId → ShardReq → IO ShardResp)
   meter : IO.Ref Counts
+  /-- Bounded wake-up queue for the shard actor, if one was spawned. -/
+  wakes : IO.Ref (Array (Option (Std.Channel.Sync Unit)))
 
 def ShardSet.shardCount (s : ShardSet) : Nat :=
   s.slots.size
@@ -60,7 +63,8 @@ private def fresh (epoch : Epoch) (host : HostId) (slots : Array (Option DB))
   let directory ← IO.mkRef dir
   let remote ← IO.mkRef rejectRemote
   let meter ← IO.mkRef (default : Counts)
-  return { host, epoch := epochRef, directory, slots, remote, meter }
+  let wakes ← IO.mkRef (Array.replicate slots.size none)
+  return { host, epoch := epochRef, directory, slots, remote, meter, wakes }
 
 /-- Every shard of `epoch` is a memory `DB` on `host`. `epoch.bounds.length + 1` shards. -/
 def ShardSet.openMem (epoch : Epoch) (host : HostId := { n := 0 }) : IO ShardSet := do

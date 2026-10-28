@@ -135,7 +135,7 @@ def Tx.enqueue (tx : Tx) (dest : Nat) (note : Notice) (idx : Nat) : IO Unit := d
   let some v := FitBytes.ofList? (encodeNotice note) | throw (IO.userError "notice does not fit")
   tx.putLocal k v
 
-private def ticketOf (dest : Nat) (k : FitBytes) : Option Nat :=
+def ticketOf (dest : Nat) (k : FitBytes) : Option Nat :=
   let pre := outPrefix dest
   if pre.isPrefixOf k.bytes then
     match readBe 8 (k.bytes.drop pre.length) with

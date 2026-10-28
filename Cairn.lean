@@ -1,4 +1,5 @@
 import Cairn.Backup
+import Cairn.Actor
 import Cairn.Coll
 import Cairn.Copy
 import Cairn.DB

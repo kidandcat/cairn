@@ -778,6 +778,139 @@ def testBackupMetrics : IO Unit := do
   finally
     IO.FS.removeDirAll dir
 
+def byteKey (b : UInt8) : FitBytes :=
+  ⟨[b], by rw [List.length_cons, List.length_nil]; decide⟩
+
+def testActors : IO Unit := do
+  let box ← Std.Channel.Sync.new (some 1)
+  check "mailbox accepts one" (← box.trySend ())
+  check "mailbox backpressure" (!(← box.trySend ()))
+  let blocked ← IO.asTask (prio := .dedicated) do
+    box.send ()
+  let _ ← box.recv
+  match ← IO.wait blocked with
+  | .ok () => check "sender resumed" true
+  | .error e => throw e
+  let s ← ShardSet.openMem Epoch.single
+  let pre ← mustFit "pre"
+  s.put pre pre
+  check "get skips the actor" ((← s.get pre) == some pre)
+  let seq ← mustFit "seq"
+  let act ← Actor.spawn s 0 (fun payload tx => do
+    let prev := match ← tx.get seq with
+      | some f => f.bytes
+      | none => []
+    let some nv := FitBytes.ofList? (prev ++ payload.bytes) | throw (IO.userError "seq")
+    tx.put seq nv) 8 3
+  for i in [0:3] do
+    s.send 0 { origin := 0, payload := byteKey (UInt8.ofNat i) }
+  let mut ordered := false
+  for _ in [0:80] do
+    match ← s.get seq with
+    | some f =>
+        if f.bytes == [0, 1, 2] then
+          ordered := true
+          break
+    | none => pure ()
+    IO.sleep 2
+  check "origin order" ordered
+  Actor.stop act s
+  let hits ← IO.mkRef 0
+  let seen ← mustFit "seen"
+  let boom ← Actor.spawn s 0 (fun payload tx => do
+    if payload.bytes == [255] then
+      let n ← hits.get
+      hits.set (n + 1)
+      if n < 2 then
+        throw (IO.userError "boom")
+    tx.put seen payload) 8 6
+  s.send 0 { origin := 0, payload := byteKey 255 }
+  let mut restarted := false
+  for _ in [0:80] do
+    match ← s.get seen with
+    | some v =>
+        if v == byteKey 255 then
+          restarted := true
+          break
+    | none => pure ()
+    IO.sleep 2
+  check "restart after exception" (restarted && (← hits.get) ≥ 3)
+  Actor.stop boom s
+  let poison ← Actor.spawn s 0 (fun payload tx => do
+    if payload.bytes == [254] then
+      throw (IO.userError "poison")
+    else
+      tx.put (byteKey payload.bytes[0]!) payload) 8 2
+  s.send 0 { origin := 0, payload := byteKey 254 }
+  s.send 0 { origin := 0, payload := byteKey 7 }
+  let mut letter := false
+  for _ in [0:80] do
+    let dead ← poison.deadCount.get
+    match ← s.get (byteKey 7) with
+    | some _ =>
+        if dead ≥ 1 then
+          letter := true
+          break
+    | none => pure ()
+    IO.sleep 2
+  check "dead letter" letter
+  Actor.stop poison s
+  let many ← ShardSet.openMem Epoch.single
+  let fan ← Actor.spawn many 0 (fun payload tx => do
+    tx.put payload payload) 64 3
+  let mut tasks : List (Task (Except IO.Error Unit)) := []
+  for t in [0:4] do
+    let task ← IO.asTask (prio := .dedicated) do
+      for j in [0:5] do
+        let b := UInt8.ofNat (t * 5 + j + 1)
+        many.send 0 { origin := 0, payload := byteKey b }
+    tasks := task :: tasks
+  for task in tasks do
+    match ← IO.wait task with
+    | .ok () => pure ()
+    | .error e => throw e
+  let mut got := 0
+  for _ in [0:100] do
+    got := 0
+    for i in [1:21] do
+      match ← many.get (byteKey (UInt8.ofNat i)) with
+      | some _ => got := got + 1
+      | none => pure ()
+    if got == 20 then
+      break
+    IO.sleep 2
+  check "concurrent sends" (got == 20)
+  Actor.stop fan many
+  many.close
+  let dir ← IO.FS.createTempDir
+  try
+    let file ← ShardSet.openFiles dir Epoch.single
+    let writer ← Actor.spawn file 0 (fun payload tx => do
+      tx.put payload payload) 8 3
+    for i in [1:4] do
+      file.send 0 { origin := 0, payload := byteKey (UInt8.ofNat i) }
+    let mut ready := false
+    for _ in [0:80] do
+      match ← file.get (byteKey 3) with
+      | some _ =>
+          ready := true
+          break
+      | none => IO.sleep 2
+    check "file actor wrote" ready
+    Actor.stop writer file
+    file.close
+    let reopened ← ShardSet.openFiles dir Epoch.single
+    check "reopen has no duplicate key" ((← reopened.get (byteKey 1)) == some (byteKey 1))
+    let again ← Actor.spawn reopened 0 (fun payload tx => do
+      tx.put payload (byteKey 9)) 8 3
+    IO.sleep 30
+    check "resume did not overwrite" ((← reopened.get (byteKey 1)) == some (byteKey 1))
+    Actor.stop again reopened
+    reopened.close
+  finally
+    IO.FS.removeDirAll dir
+  s.close
+
 def testCopies : IO Unit := do
   let epoch : Epoch := { gen := 0, bounds := ["m".toUTF8.toList] }
   let dir ← IO.FS.createTempDir
@@ -886,5 +1019,6 @@ def main : IO UInt32 := do
   testOccIndex
   testBackupMetrics
   testCopies
+  testActors
   IO.println "cairn tests ok"
   return 0

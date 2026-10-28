@@ -142,6 +142,7 @@ lake test
 | `ShardSet.watch` | One shard's log from an LSN, filtered by prefix. No cross-shard order. |
 | `ShardSet.transact` | Body under the shard mutex. `Tx.get` / `range` / `prefix` / `put` / `delete`. One batch, or nothing if the body throws or touches another shard. |
 | `commitCross` / `propagate` / `readCopy` | Home write plus outbox notices. Destination applies each ticket once. `readCopy` can lag. `commit` stays strict. |
+| `Actor.spawn` / `ShardSet.send` | One loop per shard. Bounded mailbox, durable inbox, async reply. Reads stay on `Ref.get`. |
 | `Sec.put` | Document and secondary-index keys in one batch. Refused across shards. |
 | `DB.backupFile` / `compactAsync` | Copy records with `lsn ≤ n`. Compact on a background task. |
 | `migrate` / `ShardSet.counts` | Schema version key. Get and local-commit counters, plus last commit latency. |
@@ -193,6 +194,7 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 | `CopyModel.applyTicket_idem` | Applying the same ticket twice is the same as applying it once. |
 | `CopyModel.numbered_fold` | Tickets `start, start+1, …` replay the ops in that order. |
 | `CopyModel.converge` | After those tickets, a copy that started empty matches `applyBatch` of the home log. |
+| `ActorModel.process_one`, `ActorModel.process_fold` | One message is one batch. The mailbox in order is the fold of those batches. |
 | `resume_hits`, `resume_prefix` | The next page, using the cursor, is the tail of that hit list. |
 | `mergedHits_mem` | A merged page contains an entry iff some shard snapshot did and the predicate matches. |
 | `Ulid.encode_lt_of_lt`, `Ulid.fresh_increases` | Byte order follows time order. The pure id step is strictly increasing. |
@@ -342,7 +344,9 @@ lake test
 ./.lake/build/bin/cairn-design-bench
 ./.lake/build/bin/cairn-scale-bench
 ./.lake/build/bin/cairn-copy-bench
+./.lake/build/bin/cairn-actor-bench
 ./.lake/build/bin/cairn-backend
+./scripts/actor_crash.sh
 ```
 
 GitHub Actions runs `lake build` and `lake test` once per push (the workflow is `on: push` only, via `leanprover/lean-action` with `test: true`).
