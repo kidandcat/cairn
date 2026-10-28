@@ -194,13 +194,41 @@ def ShardSet.commitMany (s : ShardSet) (batches : List (List Op)) : IO Unit := d
           | _ => throw (IO.userError "bad reply")
       | .missing => throw (IO.userError "shard has no owner")
 
-def ShardSet.transact {α : Type} (s : ShardSet) (k : FitBytes)
-    (f : View → IO (List Op × α)) : IO α := do
+/--
+Run `f` under the mutex of the shard that owns `anchor`. The body uses `Tx`
+for every read and write. One batch is committed when it returns, or nothing
+if it throws or names a key of another shard. The body holds the lock: keep
+it short, and do not do slow I/O inside. A hold past `txWarnNs` is printed
+and still commits.
+-/
+def ShardSet.transact {α : Type} (s : ShardSet) (anchor : FitBytes) (f : Tx → IO α) : IO α := do
+  let id ← s.shardId anchor
+  match ← s.locate id with
+  | .here _ =>
+      let db ← slot s id
+      let t0 ← IO.monoNanosNow
+      let ans ← db.transactTx id f
+      let t1 ← IO.monoNanosNow
+      let dt := t1 - t0
+      if txWarnNs < dt then
+        IO.eprintln s!"cairn: transact held shard {id} for {dt}ns"
+      noteCommit s dt
+      return ans
+  | .remote _ => throw (IO.userError "remote shard")
+  | .missing => throw (IO.userError "shard has no owner")
+
+/-- One key under the same lock as `transact`. Counted like a commit. -/
+def ShardSet.modifyKey {α : Type} (s : ShardSet) (k : FitBytes)
+    (f : Option FitBytes → Edit × α) : IO α := do
   let id ← s.shardId k
   match ← s.locate id with
   | .here _ =>
       let db ← slot s id
-      db.transact f
+      let t0 ← IO.monoNanosNow
+      let ans ← db.modifyKey k f
+      let t1 ← IO.monoNanosNow
+      noteCommit s (t1 - t0)
+      return ans
   | .remote _ => throw (IO.userError "remote shard")
   | .missing => throw (IO.userError "shard has no owner")
 

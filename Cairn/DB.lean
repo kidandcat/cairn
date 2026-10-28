@@ -22,6 +22,7 @@ import Cairn.Store
 import Cairn.Log
 import Cairn.Range
 import Cairn.RangeWalk
+import Cairn.Tx
 import Cairn.Router
 import Cairn.Transport
 
@@ -150,6 +151,27 @@ def DB.transact {α : Type} (db : DB) (f : View → IO (List Op × α)) : IO α 
       return ans
     commitNow db ops
     return ans
+
+/--
+The body runs under the writer lock. Reads and writes go through `Tx`.
+One batch is published after the body returns. A throw, or a key on another
+shard, publishes nothing.
+-/
+private def transactTxNow {α : Type} (db : DB) (home : Nat) (f : Tx → IO α) : IO α := do
+  if ← db.closed.get then
+    throw (IO.userError "closed")
+  let v ← db.view.get
+  let pending ← IO.mkRef ([] : List Op)
+  let tx : Tx := { base := v.index, pending, bounds := v.epoch.bounds, home }
+  let ans ← f tx
+  let ops ← pending.get
+  if ops.isEmpty then
+    return ans
+  commitNow db ops
+  return ans
+
+def DB.transactTx {α : Type} (db : DB) (home : Nat) (f : Tx → IO α) : IO α :=
+  db.writer.atomically fun _ => liftM (transactTxNow db home f)
 
 inductive Edit where
   | keep

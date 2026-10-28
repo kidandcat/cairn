@@ -54,7 +54,11 @@ def enqueueWith (s : ShardSet) (anchor : FitBytes) (ops : List Op)
   let epoch ← s.epoch.get
   if sameShard epoch.bounds batch = false then
     throw (IO.userError "outbox crossed a shard")
-  s.transact anchor fun _ => pure (batch, ())
+  s.transact anchor fun tx => do
+    for op in batch do
+      match op with
+      | .put k v => tx.put k v
+      | .del k => tx.delete k
 
 def enqueue (s : ShardSet) (priority runAt : Nat) (id : Ulid) (payload : Bytes) : IO Unit := do
   let some k := jobKey? priority runAt id | throw (IO.userError "job key does not fit")
@@ -76,17 +80,18 @@ def claim (s : ShardSet) (now leaseFor : Nat) : IO (Option (Ulid × Bytes)) := d
             if eligible now lease attempts runAt dead then
               let some nv := pack (now + leaseFor) attempts runAt dead payload
                 | throw (IO.userError "job value does not fit")
-              let won ← s.transact e.1 fun v =>
-                match Cairn.get v.index e.1 with
+              let won ← s.transact e.1 fun tx => do
+                match ← tx.get e.1 with
                 | some cur =>
                     match decode cur.bytes with
                     | some (lease2, _, runAt2, dead2, _) =>
                         if eligible now lease2 0 runAt2 dead2 && cur == e.2 then
-                          pure ([.put e.1 nv], true)
+                          tx.put e.1 nv
+                          return true
                         else
-                          pure ([], false)
-                    | none => pure ([], false)
-                | none => pure ([], false)
+                          return false
+                    | none => return false
+                | none => return false
               if won then
                 return some (id, payload)
         | _, _ => pure ()
@@ -97,36 +102,37 @@ def claim (s : ShardSet) (now leaseFor : Nat) : IO (Option (Ulid × Bytes)) := d
 
 def ack (s : ShardSet) (priority runAt : Nat) (id : Ulid) : IO Unit := do
   let some k := jobKey? priority runAt id | throw (IO.userError "job key does not fit")
-  s.transact k fun v =>
-    match Cairn.get v.index k with
-    | some _ => pure ([.del k], ())
-    | none => pure ([], ())
+  s.transact k fun tx => do
+    match ← tx.get k with
+    | some _ => tx.delete k
+    | none => pure ()
 
 def nack (s : ShardSet) (priority runAt : Nat) (id : Ulid) (now maxAttempts : Nat) : IO Unit := do
   let some k := jobKey? priority runAt id | throw (IO.userError "job key does not fit")
-  s.transact k fun v =>
-    match Cairn.get v.index k with
+  s.transact k fun tx => do
+    match ← tx.get k with
     | some cur =>
         match decode cur.bytes with
         | some (_lease, attempts, _run, dead, payload) =>
             let attempts' := attempts + 1
             if dead || maxAttempts ≤ attempts' then
               match pack 0 attempts' runAt true payload with
-              | some nv => pure ([.put k nv], ())
-              | none => pure ([], ())
+              | some nv => tx.put k nv
+              | none => pure ()
             else
               let run' := now + Job.backoff attempts'
               match pack 0 attempts' run' false payload, jobKey? priority run' id with
               | some nv, some k2 =>
-                  if sameShard v.epoch.bounds [.del k, .put k2 nv] then
-                    pure ([.del k, .put k2 nv], ())
+                  if shardOf tx.bounds k2.bytes == tx.home then
+                    tx.delete k
+                    tx.put k2 nv
                   else
                     match pack 0 attempts' run' false payload with
-                    | some stay => pure ([.put k stay], ())
-                    | none => pure ([], ())
-              | _, _ => pure ([], ())
-        | none => pure ([], ())
-    | none => pure ([], ())
+                    | some stay => tx.put k stay
+                    | none => pure ()
+              | _, _ => pure ()
+        | none => pure ()
+    | none => pure ()
 
 end Queue
 
@@ -153,7 +159,7 @@ def sweep (s : ShardSet) (now : Nat) : IO Nat := do
       match readBe 8 suf with
       | some (expiry, _) =>
           if expiry ≤ now then
-            s.transact e.1 fun _ => pure ([.del e.1], ())
+            s.transact e.1 fun tx => tx.delete e.1
             n := n + 1
           else
             return n

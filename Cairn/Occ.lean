@@ -49,17 +49,28 @@ theorem occ_conflict (m : Map) (k old new : FitBytes) (rs : List Read)
     · exact absurd (eq_of_beq hb) (Ne.symm hne)
   exact readsMatch_miss (insert m k new) k (some old) rs hmem hget
 
+/--
+Obsolete. The annotated read set can miss a write skew. New bodies use
+`ShardSet.transact` and `Tx`, which see every read they perform.
+This wrapper still checks the recorded reads through `Tx` and then writes.
+-/
 def occCommit (s : ShardSet) (anchor : FitBytes) (reads : List Read) (writes : List Op) :
     IO Bool := do
-  s.transact anchor fun v =>
-    if readsMatch v.index reads = false then
-      pure ([], false)
-    else if sameShard v.epoch.bounds writes = false then
+  s.transact anchor fun tx => do
+    let mut ok := true
+    for r in reads do
+      let cur ← tx.get r.key
+      if cur != r.saw then
+        ok := false
+    if ok = false then
+      return false
+    if sameShard tx.bounds writes = false then
       throw (IO.userError "occ crossed a shard")
-    else if writes.isEmpty then
-      pure ([], true)
-    else
-      pure (writes, true)
+    for op in writes do
+      match op with
+      | .put k v => tx.put k v
+      | .del k => tx.delete k
+    return true
 
 namespace Sec
 
@@ -83,7 +94,11 @@ def put (s : ShardSet) (doc val : FitBytes) (indexes : List FitBytes) : IO Unit 
   let epoch ← s.epoch.get
   if sameShard epoch.bounds ops = false then
     throw (IO.userError "index crossed a shard")
-  s.transact doc fun _ => pure (ops, ())
+  s.transact doc fun tx => do
+    for op in ops do
+      match op with
+      | .put k v => tx.put k v
+      | .del k => tx.delete k
 
 end Sec
 
