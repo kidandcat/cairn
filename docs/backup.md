@@ -10,7 +10,7 @@ Fase 4. La copia de un shard es el prefijo del log hasta un LSN. La compactació
 
 `migrate` lee la clave `schemaKey` (`[0]`) y, si la versión guardada es menor, escribe el paso y la versión nueva en un lote. Si ese lote cruza de shard, lanza y no publica. `schema_visible` es `get_after_put` de esa clave.
 
-`ShardSet.counts` devuelve lecturas, commits locales y los nanos del último commit. No es un histograma. El contador no cubre `transact` ni `modifyKey`, que entran al `DB` sin pasar por `ShardSet.commit`.
+`ShardSet.counts` devuelve lecturas, commits locales y los nanos del último commit. No es un histograma. `ShardSet.commit`, `ShardSet.transact` y `ShardSet.modifyKey` incrementan `commits` y graban `lastCommitNs` al volver. Un `transact` que no escribe también cuenta: sostuvo el mutex. Un commit remoto no pasa por ese contador.
 
 ## Demostrado
 

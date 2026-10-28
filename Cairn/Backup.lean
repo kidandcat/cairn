@@ -60,14 +60,16 @@ theorem schema_visible (m : Map) (ver : FitBytes) :
   get_after_put m schemaKey ver
 
 def migrate (s : ShardSet) (target : UInt64) (step : UInt64 → List Op) : IO UInt64 := do
-  s.transact schemaKey fun v => do
-    let cur := readSchema (Cairn.get v.index schemaKey)
+  s.transact schemaKey fun tx => do
+    let cur := readSchema (← tx.get schemaKey)
     if target ≤ cur then
-      return ([], cur)
+      return cur
     else
-      let ops := step cur ++ [.put schemaKey (encodeSchema target)]
-      if sameShard v.epoch.bounds ops = false then
-        throw (IO.userError "migration crossed a shard")
-      return (ops, target)
+      for op in step cur do
+        match op with
+        | .put k v => tx.put k v
+        | .del k => tx.delete k
+      tx.put schemaKey (encodeSchema target)
+      return target
 
 end Cairn

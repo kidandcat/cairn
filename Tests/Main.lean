@@ -681,8 +681,65 @@ def testOccIndex : IO Unit := do
   catch _ => pure true
   check "index split refused" crossed
   check "split document absent" ((← s2.get (← mustFit "a")) == none)
+  let before ← s.counts
+  s.transact k1 fun tx => do
+    tx.put k2 (← mustFit "ryw")
+    let saw ← tx.get k2
+    check "read own write" (saw == some (← mustFit "ryw"))
+  check "transact counted" ((← s.counts).commits == before.commits + 1)
+  let lost ← try
+    s.transact k1 fun tx => do
+      tx.put k1 (← mustFit "nope")
+      throw (IO.userError "abort")
+    pure false
+  catch _ => pure true
+  check "throw writes nothing" (lost && (← s.get k1) == some z)
+  let modBefore ← s.counts
+  let _ ← s.modifyKey k1 fun cur => (.keep, cur)
+  check "modifyKey counted" ((← s.counts).commits == modBefore.commits + 1)
   s.close
   s2.close
+  let split ← ShardSet.openMem { gen := 0, bounds := ["m".toUTF8.toList] }
+  let lo ← mustFit "a"
+  let hi ← mustFit "z"
+  let foreign ← try
+    split.transact lo fun tx => do
+      tx.put lo (← mustFit "1")
+      tx.put hi (← mustFit "2")
+    pure false
+  catch _ => pure true
+  check "foreign key rejected" foreign
+  check "foreign home untouched" ((← split.get lo) == none)
+  split.close
+  let okv ← mustFit "ok"
+  let gone ← mustFit "gone"
+  let skew (n : Nat) : IO Unit := do
+    let sh ← ShardSet.openMem Epoch.single
+    let acctA ← mustFit "acct-a"
+    let acctB ← mustFit "acct-b"
+    sh.put acctA okv
+    sh.put acctB okv
+    let mut tasks : List (Task (Except IO.Error Unit)) := []
+    for i in [0:n] do
+      let mine := if i % 2 == 0 then acctA else acctB
+      let other := if i % 2 == 0 then acctB else acctA
+      let t ← IO.asTask (prio := .dedicated) do
+        sh.transact mine fun tx => do
+          let x ← tx.get mine
+          let y ← tx.get other
+          if x == some okv && y == some okv then
+            tx.put mine gone
+      tasks := t :: tasks
+    for t in tasks do
+      match ← IO.wait t with
+      | .ok _ => pure ()
+      | .error e => throw e
+    let va ← sh.get acctA
+    let vb ← sh.get acctB
+    check s!"skew {n}" (!(va == some gone && vb == some gone))
+    sh.close
+  skew 2
+  skew 4
 
 def testBackupMetrics : IO Unit := do
   let dir ← IO.FS.createTempDir

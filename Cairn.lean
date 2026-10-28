@@ -12,6 +12,7 @@ import Cairn.Cluster
 import Cairn.Directory
 import Cairn.ShardModel
 import Cairn.ShardSet
+import Cairn.Tx
 import Cairn.Snapshot
 import Cairn.Crash
 import Cairn.Sum32Thm

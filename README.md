@@ -26,7 +26,7 @@ This is not a SQL database.
 - SQL, a query planner, or a page cache.
 - A cross-shard transaction. A batch whose keys fall in more than one shard is rejected. There is no two-phase commit.
 - Network, elections, terms, votes, quorums, a commit index, and a membership protocol. The seams are in place (`Locate.remote`, `ShardReq`, `Mailbox`, `planCatchup`). Nothing dials a socket. See [Cluster](#cluster).
-- Several writers of the same shard. Callers of one `DB` may overlap; that shard's mutex runs their commits one at a time. Optimistic concurrency inside a shard (design C in the comparison) waits until one shard is the bottleneck.
+- Several writers of the same shard interleaving inside one critical section. Callers may overlap; that shard's mutex runs `commit` and `transact` one at a time. `transact` is serializable inside the shard because the body runs under that lock. The annotated read set (`occCommit`) is obsolete.
 - A global snapshot, or a serial order of commits that touch different shards.
 - Hardware that reports a successful flush without writing the bytes. A physical sector larger than 4096 bytes. Checksum collisions outside the classes named above. Two-bit errors at distance greater than 31.
 - The macOS `F_FULLFSYNC` branch is compiled only under `__APPLE__`. It was not executed here.
@@ -140,7 +140,7 @@ lake test
 | `Queue.enqueueWith` / `claim` / `ack` / `nack` | Jobs in key order. Outbox is one batch; a cross-shard batch is refused. |
 | `Ttl.put` / `Ttl.sweep` | Expiry index is the key order under prefix `04`. |
 | `ShardSet.watch` | One shard's log from an LSN, filtered by prefix. No cross-shard order. |
-| `occCommit` | One shard. Writes only if every recorded read still matches. |
+| `ShardSet.transact` | Body under the shard mutex. `Tx.get` / `range` / `prefix` / `put` / `delete`. One batch, or nothing if the body throws or touches another shard. |
 | `Sec.put` | Document and secondary-index keys in one batch. Refused across shards. |
 | `DB.backupFile` / `compactAsync` | Copy records with `lsn ≤ n`. Compact on a background task. |
 | `migrate` / `ShardSet.counts` | Schema version key. Get and local-commit counters, plus last commit latency. |
@@ -185,6 +185,10 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 | `rangeWalk_eq`, `prefixWalk_eq`, `rangeWalk_cursor`, `prefixWalk_cursor` | The tree page, stopped after `limit`, is that filtered page, and its cursor is the full list's cursor. |
 | `isPrefixOf_iff_bounds` | Keys with byte prefix `p` are the half-open interval from `p` to `prefixSucc p`. |
 | `take_mergeAll` | The first `limit` rows of a merge are the merge of each part's first `limit` rows. |
+| `TxRun.run_ok_apply` | A successful pure body is `applyBatch` of its ops on the map it started from. |
+| `TxRun.run_abort`, `TxRun.run_abort_after` | An `abort` step, including after earlier writes in the body, returns no map. |
+| `TxRun.compose` | Two successful bodies in order are the concatenation of their steps. |
+| `TxRun.read_own_write` | A put then the end of that one-step body is the inserted map. |
 | `resume_hits`, `resume_prefix` | The next page, using the cursor, is the tail of that hit list. |
 | `mergedHits_mem` | A merged page contains an entry iff some shard snapshot did and the predicate matches. |
 | `Ulid.encode_lt_of_lt`, `Ulid.fresh_increases` | Byte order follows time order. The pure id step is strictly increasing. |

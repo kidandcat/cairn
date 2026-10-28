@@ -47,15 +47,8 @@ private def editOf (cur : Option FitBytes) (intent : Intent) : Edit × CasResult
       | some packed, some (ver, _) => (.put packed, .ok ver)
       | _, _ => (.keep, .conflict)
 
-private def onKey (s : ShardSet) (k : FitBytes) (intent : Intent) : IO CasResult := do
-  let id ← s.shardId k
-  match ← s.locate id with
-  | .here _ =>
-      match s.slots[id]? with
-      | some (some db) => db.modifyKey k (fun cur => editOf cur intent)
-      | _ => throw (IO.userError "shard not hosted")
-  | .remote _ => throw (IO.userError "remote shard")
-  | .missing => throw (IO.userError "shard has no owner")
+private def onKey (s : ShardSet) (k : FitBytes) (intent : Intent) : IO CasResult :=
+  s.modifyKey k (fun cur => editOf cur intent)
 
 private def requireKey (name : String) (id : Ulid) : IO FitBytes := do
   let raw := name.toUTF8.toList
