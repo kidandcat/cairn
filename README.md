@@ -125,6 +125,7 @@ lake test
 | `DB.commitMany batches` | One segment of several records, one `sync`. A tear drops the whole segment. |
 | `DB.openFileRepair` | Truncate a torn tail or mid-log corruption. A foreign file is left in place. |
 | `DB.iterate` | Entries in lexicographic key order. |
+| `DB.range` / `DB.prefix` | One snapshot, ordered page. `lo` inclusive, `hi` exclusive, `after` strict. |
 | `DB.snapshot` | The current immutable view. |
 | `DB.compact` | Rewrite the live map. Sequence numbers change. |
 | `DB.close` | Flush and refuse later commits. |
@@ -134,11 +135,19 @@ lake test
 | `ShardSet.openMem` / `openFiles` / `openHosted` | One `DB` per shard. `openFiles` uses `dir/shard-<id>.cairn`. `openHosted` leaves the other slots empty. |
 | `ShardSet.get` / `put` / `delete` / `commit` / `commitMany` | Route with `shardOf`. A cross-shard batch throws. A remote shard calls `remote`. |
 | `ShardSet.iterate` | Sorted merge of one snapshot per shard. Not a global snapshot. |
+| `ShardSet.range` / `prefix` | Same merge, then the page. A prefix may cross shards. Still not one snapshot. |
+| `collInsert` / `collGet` / `collUpdate` / `collDelete` / `collList` | A collection is a key prefix. Versioned compare-and-set. `collList` is `prefix`. |
 | `ShardSet.serve` | Handle a `ShardReq` for a shard this host owns. |
 | `ShardSet.publish` | Bump the directory generation and set the owner. Does not move bytes. |
 | `ShardSet.pushLog` | `planCatchup` then `Mailbox.send` for one shard. |
 
-Reads do not take the mutex. `get` is one `Ref.get` plus a tree lookup. `ShardSet.iterate` does one such read per shard, in shard-id order, with no lock across them. The memory backend appends by consing a frame. `readAll` joins those chunks. The record list in the `View` is newest-first for the same reason.
+Reads do not take the mutex. `get` is one `Ref.get` plus a tree lookup. `ShardSet.iterate` does one such read per shard, in shard-id order, with no lock across them. `range` and `prefix` do the same reads and then keep the keys inside the interval. The memory backend appends by consing a frame. `readAll` joins those chunks. The record list in the `View` is newest-first for the same reason.
+
+## Collections
+
+A collection is a byte prefix: tag `1`, a `UInt32` length, the name, tag `2`, then a 16-byte id. The id is a `Ulid` (48-bit milliseconds, then 80 bits), big-endian, so lexicographic order is time order (`Ulid.encode_lt_of_lt`). `IdGen` takes a `Clock`. Tests pass a counter.
+
+The stored value is a `UInt64` version plus a `Val` (`bytes`, `str`, or `nat`). `collInsert` fails if the id exists. `collUpdate` and `collDelete` run under that key's writer lock and write only when the version matches (`resolve_*`). The version does not wrap (`expect + 1 ≠ 0`). One document is one key, so it is one shard. `collList` is `ShardSet.prefix`: a prefix can cross shards, and the page is the merge of the snapshots that were read. There is no global snapshot. A remote shard throws `remote shard` on a collection write. `Demo/Backend.lean` inserts two items and checks the order. CI builds `cairn-backend` and runs it.
 
 ## On disk
 
@@ -165,6 +174,11 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 | `nodup_replay` | Replay from empty has no duplicate keys. |
 | `compact_eq`, `compact_roundtrip` | Compaction replays to the same `entries`, including through the codec. Not the same tree shape. |
 | `entries_sorted`, `entries_nodup`, `entries_of_get` | Iteration is sorted by key bytes, lists each key once, and agrees with `get`. |
+| `rangeHits_mem`, `prefixHits_mem`, `rangeHits_sorted`, `rangeHits_nodup`, `prefixHits_sorted`, `prefixHits_nodup` | A range or prefix is exactly the entries inside the interval, in order, each key once. |
+| `resume_hits`, `resume_prefix` | The next page, using the cursor, is the tail of that hit list. |
+| `mergedHits_mem` | A merged page contains an entry iff some shard snapshot did and the predicate matches. |
+| `Ulid.encode_lt_of_lt`, `Ulid.fresh_increases` | Byte order follows time order. The pure id step is strictly increasing. |
+| `resolve_insert_fresh`, `resolve_insert_taken`, `resolve_update_ok`, `resolve_update_conflict`, `resolve_delete_ok`, `resolve_delete_conflict` | Compare-and-set writes the next version only when the stored version matches. |
 | `get_insert`, `get_insert_ne`, `get_remove` | Tree insert and erase have the map equations the list index had. |
 | `key_one_shard`, `shardOf_deterministic`, `shardOf_range` | One shard id per key per bounds, in range, a function of the inputs. |
 | `shardHash_range` | The hash id is `< n` when `n > 0`. |
@@ -251,6 +265,14 @@ file-contended-1-tasks-4 ops=400  153274ns/op 6524ops/s  154198ns/op 6485ops/s  
 
 On this ext4 the file rows stay on the `fdatasync` cost: one shard about 0.17–0.28 ms/op in both runs, four shards about 14–19k ops/s. Four tasks on one shard stay on that shard's mutex. The group row is one barrier per 32 records, about 5–12 µs/op across the two runs. The memory rows were the copy. One shard went from about 5.4–5.5 ms/op to about 34–59 µs/op. Two and four shards still scale. Those memory rows are not a disk, and 100 keys do not show the tree's asymptotic gap against the old linear scan: the byte-log copy dominated that benchmark. An earlier list-index run of this harness is in the history of this file; it is not part of this pair.
 
+A later run, after range and collections, kept the shard rows in that same band (file one shard about 0.16–0.18 ms/op, memory one shard about 42–50 µs/op). `mem-prefix-pages` puts 1000 keys outside the clock, then walks them in pages of 40. The clock is the walk.
+
+```
+mem-prefix-pages ops=1000  1131ns/op 884173ops/s  1012ns/op 988142ops/s  931ns/op 1074113ops/s
+```
+
+The walk filters each shard's entry list. It is not a tree lower bound. About 1 µs per key on this machine is that filter plus the merge.
+
 ## Building
 
 ```
@@ -260,6 +282,7 @@ lake test
 ./.lake/build/bin/cairn-bench
 ./.lake/build/bin/cairn-durable-bench
 ./.lake/build/bin/cairn-design-bench
+./.lake/build/bin/cairn-backend
 ```
 
 GitHub Actions runs `lake build` and `lake test` once per push (the workflow is `on: push` only, via `leanprover/lean-action` with `test: true`).

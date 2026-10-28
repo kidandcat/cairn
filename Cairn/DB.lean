@@ -20,6 +20,7 @@ publish the new epoch in the same view. It does not run a consensus protocol.
 import Std.Sync.Mutex
 import Cairn.Store
 import Cairn.Log
+import Cairn.Range
 import Cairn.Router
 import Cairn.Transport
 
@@ -52,6 +53,21 @@ def DB.get (db : DB) (k : FitBytes) : IO (Option FitBytes) := do
 
 def DB.iterate (db : DB) : IO (List (FitBytes × FitBytes)) := do
   return entries (← db.snapshot).index
+
+/--
+One snapshot. Inclusive `lo`, exclusive `hi`, strict `after` cursor.
+`pageCursor` is the last key when the page is full.
+-/
+def DB.range (db : DB) (lo hi after : Option FitBytes) (limit : Nat) :
+    IO (List (FitBytes × FitBytes) × Option FitBytes) := do
+  let rows := rangeHits (← db.snapshot).index lo hi after
+  return (rows.take limit, pageCursor limit rows)
+
+/-- Keys whose bytes start with `p`, same cursor rule as `range`. -/
+def DB.prefix (db : DB) (p : Bytes) (after : Option FitBytes) (limit : Nat) :
+    IO (List (FitBytes × FitBytes) × Option FitBytes) := do
+  let rows := prefixHits (← db.snapshot).index p after
+  return (rows.take limit, pageCursor limit rows)
 
 def DB.readLog (db : DB) : IO (List Record) := do
   return (← db.snapshot).records
@@ -117,6 +133,38 @@ private def commitManyNow (db : DB) (batches : List (List Op)) : IO Unit := do
 
 def DB.commit (db : DB) (ops : List Op) : IO Unit :=
   db.writer.atomically fun _ => liftM (commitNow db ops)
+
+inductive Edit where
+  | keep
+  | put (v : FitBytes)
+  | del
+
+/--
+Read and maybe write one key under the writer lock. `f` sees the value from
+that locked view. One key is one shard.
+-/
+def DB.modifyKey {α : Type} (db : DB) (k : FitBytes)
+    (f : Option FitBytes → Edit × α) : IO α :=
+  db.writer.atomically fun _ => liftM do
+    if ← db.closed.get then
+      throw (IO.userError "closed")
+    let v ← db.view.get
+    let cur := Cairn.get v.index k
+    let (edit, ans) := f cur
+    match edit with
+    | .keep => return ans
+    | .del =>
+        match cur with
+        | none => return ans
+        | some _ =>
+            commitNow db [.del k]
+            return ans
+    | .put nv =>
+        if cur == some nv then
+          return ans
+        else
+          commitNow db [.put k nv]
+          return ans
 
 /-- Several batches, one segment, one `sync`. A crash drops the whole group or keeps it. -/
 def DB.commitMany (db : DB) (batches : List (List Op)) : IO Unit :=

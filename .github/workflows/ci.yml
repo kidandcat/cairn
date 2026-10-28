@@ -11,3 +11,8 @@ jobs:
       - uses: leanprover/lean-action@v1
         with:
           test: true
+      - name: backend demo
+        run: |
+          source "$HOME/.elan/env"
+          lake build cairn-backend
+          ./.lake/build/bin/cairn-backend

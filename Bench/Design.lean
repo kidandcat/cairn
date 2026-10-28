@@ -101,6 +101,24 @@ def runContended (tasksN puts : Nat) : IO Nat := do
   finally
     IO.FS.removeDirAll dir
 
+/-- Page a thousand memory keys. Puts are outside the clock. -/
+def runPrefixPages : IO Nat := do
+  let s ← ShardSet.openMem Epoch.single
+  for i in [0:1000] do
+    s.put (fitKey 0 i) (fitKey 0 i)
+  let t0 ← IO.monoNanosNow
+  let mut after : Option FitBytes := none
+  let mut seen := 0
+  for _ in [0:25] do
+    let (rows, cur) ← s.prefix [0] after 40
+    seen := seen + rows.length
+    after := cur
+  let t1 ← IO.monoNanosNow
+  s.close
+  if seen != 1000 then
+    throw (IO.userError s!"prefix saw {seen}")
+  return t1 - t0
+
 def main : IO UInt32 := do
   let cpu ← IO.FS.readFile "/proc/cpuinfo"
   let model := (cpu.splitOn "\n").find? (·.startsWith "model name") |>.getD "model name: unknown"
@@ -113,4 +131,5 @@ def main : IO UInt32 := do
   let gputs := 128
   showRow "file-group-32-shards-4" (4 * gputs) (runGroup 4 gputs 32)
   showRow "file-contended-1-tasks-4" (4 * puts) (runContended 4 puts)
+  showRow "mem-prefix-pages" 1000 runPrefixPages
   return 0
