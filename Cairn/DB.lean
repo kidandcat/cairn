@@ -82,7 +82,7 @@ private def appendFrame (store : Store) (payload : Bytes) : IO Unit := do
     throw (IO.userError "record does not fit")
   store.append (encodeFrame segMagic payload)
 
-private def commitNow (db : DB) (ops : List Op) : IO Unit := do
+private def commitNow (db : DB) (ops : List Op) (crossOk : Bool := false) : IO Unit := do
   if ← db.closed.get then
     throw (IO.userError "closed")
   if ops.isEmpty then
@@ -90,7 +90,7 @@ private def commitNow (db : DB) (ops : List Op) : IO Unit := do
   let some batch := Batch.ofList? ops
     | throw (IO.userError "batch too large")
   let v ← db.view.get
-  if sameShard v.epoch.bounds ops = false then
+  if crossOk = false && sameShard v.epoch.bounds ops = false then
     throw (IO.userError "cross-shard batch")
   let record : Record := Record.ofBatch v.nextLsn batch
   appendFrame db.store (encodeRecord record)
@@ -162,12 +162,14 @@ private def transactTxNow {α : Type} (db : DB) (home : Nat) (f : Tx → IO α) 
     throw (IO.userError "closed")
   let v ← db.view.get
   let pending ← IO.mkRef ([] : List Op)
-  let tx : Tx := { base := v.index, pending, bounds := v.epoch.bounds, home }
+    let tx : Tx :=
+      { base := v.index, pending, bounds := v.epoch.bounds, home, nextLsn := v.nextLsn }
   let ans ← f tx
   let ops ← pending.get
   if ops.isEmpty then
     return ans
-  commitNow db ops
+  -- Outbox keys are stored in this file even when `shardOf` disagrees.
+  commitNow db ops true
   return ans
 
 def DB.transactTx {α : Type} (db : DB) (home : Nat) (f : Tx → IO α) : IO α :=

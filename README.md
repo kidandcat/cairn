@@ -24,7 +24,7 @@ This is not a SQL database.
 ## Non-goals
 
 - SQL, a query planner, or a page cache.
-- A cross-shard transaction. A batch whose keys fall in more than one shard is rejected. There is no two-phase commit.
+- A cross-shard transaction. `commit` still rejects a batch whose keys fall in more than one shard. `commitCross` does not: it writes the home shard and leaves notices for the others. That is eventual, not atomic. There is no two-phase commit.
 - Network, elections, terms, votes, quorums, a commit index, and a membership protocol. The seams are in place (`Locate.remote`, `ShardReq`, `Mailbox`, `planCatchup`). Nothing dials a socket. See [Cluster](#cluster).
 - Several writers of the same shard interleaving inside one critical section. Callers may overlap; that shard's mutex runs `commit` and `transact` one at a time. `transact` is serializable inside the shard because the body runs under that lock. The annotated read set (`occCommit`) is obsolete.
 - A global snapshot, or a serial order of commits that touch different shards.
@@ -141,6 +141,7 @@ lake test
 | `Ttl.put` / `Ttl.sweep` | Expiry index is the key order under prefix `04`. |
 | `ShardSet.watch` | One shard's log from an LSN, filtered by prefix. No cross-shard order. |
 | `ShardSet.transact` | Body under the shard mutex. `Tx.get` / `range` / `prefix` / `put` / `delete`. One batch, or nothing if the body throws or touches another shard. |
+| `commitCross` / `propagate` / `readCopy` | Home write plus outbox notices. Destination applies each ticket once. `readCopy` can lag. `commit` stays strict. |
 | `Sec.put` | Document and secondary-index keys in one batch. Refused across shards. |
 | `DB.backupFile` / `compactAsync` | Copy records with `lsn ≤ n`. Compact on a background task. |
 | `migrate` / `ShardSet.counts` | Schema version key. Get and local-commit counters, plus last commit latency. |
@@ -189,6 +190,9 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 | `TxRun.run_abort`, `TxRun.run_abort_after` | An `abort` step, including after earlier writes in the body, returns no map. |
 | `TxRun.compose` | Two successful bodies in order are the concatenation of their steps. |
 | `TxRun.read_own_write` | A put then the end of that one-step body is the inserted map. |
+| `CopyModel.applyTicket_idem` | Applying the same ticket twice is the same as applying it once. |
+| `CopyModel.numbered_fold` | Tickets `start, start+1, …` replay the ops in that order. |
+| `CopyModel.converge` | After those tickets, a copy that started empty matches `applyBatch` of the home log. |
 | `resume_hits`, `resume_prefix` | The next page, using the cursor, is the tail of that hit list. |
 | `mergedHits_mem` | A merged page contains an entry iff some shard snapshot did and the predicate matches. |
 | `Ulid.encode_lt_of_lt`, `Ulid.fresh_increases` | Byte order follows time order. The pure id step is strictly increasing. |
@@ -337,6 +341,7 @@ lake test
 ./.lake/build/bin/cairn-durable-bench
 ./.lake/build/bin/cairn-design-bench
 ./.lake/build/bin/cairn-scale-bench
+./.lake/build/bin/cairn-copy-bench
 ./.lake/build/bin/cairn-backend
 ```
 

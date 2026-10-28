@@ -35,6 +35,9 @@ lean_exe «cairn-design-bench» where
 lean_exe «cairn-scale-bench» where
   root := `Bench.Scale
 
+lean_exe «cairn-copy-bench» where
+  root := `Bench.Copy
+
 lean_exe «cairn-sync-trace» where
   root := `Demo.SyncTrace
 
