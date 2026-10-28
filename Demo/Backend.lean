@@ -39,6 +39,22 @@ def main : IO UInt32 := do
   let events ← s.watch 0 0 []
   if events.isEmpty then
     throw (IO.userError "feed empty")
+  let some pong := FitBytes.ofString? "pong" | throw (IO.userError "pong")
+  let some ping := FitBytes.ofString? "ping" | throw (IO.userError "ping")
+  let act ← Actor.spawn s 0 (fun payload tx => do
+    tx.put pong payload) 8 3
+  s.send 0 { origin := 0, payload := ping }
+  let mut actorOk := false
+  for _ in [0:50] do
+    match ← s.get pong with
+    | some v =>
+        if v == ping then
+          actorOk := true
+          break
+    | none => IO.sleep 2
+  if !actorOk then
+    throw (IO.userError "actor did not apply")
+  Actor.stop act s
   IO.println "backend demo ok"
   s.close
   return 0

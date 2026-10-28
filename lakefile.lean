@@ -38,6 +38,9 @@ lean_exe «cairn-scale-bench» where
 lean_exe «cairn-copy-bench» where
   root := `Bench.Copy
 
+lean_exe «cairn-actor-bench» where
+  root := `Bench.Actor
+
 lean_exe «cairn-sync-trace» where
   root := `Demo.SyncTrace
 
@@ -49,3 +52,9 @@ lean_exe «cairn-recover» where
 
 lean_exe «cairn-backend» where
   root := `Demo.Backend
+
+lean_exe «cairn-actor-writer» where
+  root := `Demo.ActorWrite
+
+lean_exe «cairn-actor-recover» where
+  root := `Demo.ActorRecover
