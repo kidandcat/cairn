@@ -1,5 +1,6 @@
 import Cairn.Backup
 import Cairn.Coll
+import Cairn.Copy
 import Cairn.DB
 import Cairn.Doc
 import Cairn.Feed

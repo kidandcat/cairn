@@ -27,6 +27,8 @@ structure Tx where
   pending : IO.Ref (List Op)
   bounds : List Bytes
   home : Nat
+  /-- LSN this body will commit as. Stable: the shard lock is held. -/
+  nextLsn : UInt64
 
 def Tx.seen (tx : Tx) : IO Map := do
   return applyBatch tx.base (← tx.pending.get)
@@ -45,6 +47,19 @@ def Tx.put (tx : Tx) (k v : FitBytes) : IO Unit := do
 
 def Tx.delete (tx : Tx) (k : FitBytes) : IO Unit := do
   guardKey tx k
+  let ops ← tx.pending.get
+  tx.pending.set (ops ++ [.del k])
+
+/--
+Write a key into this shard's file without the `shardOf` check.
+Outbox and progress keys live in the file of the shard that owns the
+batch. `ShardSet.get` will not route to them. Propagators read that file.
+-/
+def Tx.putLocal (tx : Tx) (k v : FitBytes) : IO Unit := do
+  let ops ← tx.pending.get
+  tx.pending.set (ops ++ [.put k v])
+
+def Tx.deleteLocal (tx : Tx) (k : FitBytes) : IO Unit := do
   let ops ← tx.pending.get
   tx.pending.set (ops ++ [.del k])
 

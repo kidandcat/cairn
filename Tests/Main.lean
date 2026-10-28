@@ -778,6 +778,97 @@ def testBackupMetrics : IO Unit := do
   finally
     IO.FS.removeDirAll dir
 
+def testCopies : IO Unit := do
+  let epoch : Epoch := { gen := 0, bounds := ["m".toUTF8.toList] }
+  let dir ← IO.FS.createTempDir
+  try
+    let s ← ShardSet.openFiles dir epoch
+    let a ← mustFit "a"
+    let z ← mustFit "z"
+    let v ← mustFit "v"
+    let w ← mustFit "w"
+    let r ← commitCross s [.put a v, .put z v]
+    check "cross is eventual" (r == .eventual 0 [1])
+    let strict ← try
+      let _ ← commitCross s [.put a v, .put z w] true
+      pure false
+    catch _ => pure true
+    check "strict still rejects" strict
+    check "strict left home" ((← s.get a) == some v)
+    s.close
+    let s2 ← ShardSet.openFiles dir epoch
+    check "home survived reopen" ((← s2.get a) == some v)
+    check "copy missing before propagate" ((← s2.localGet 1 z) == none)
+    let n ← propagate s2 0 1 (fun _ _ => pure ())
+    check "propagated one" (n == 1)
+    check "copy matches home value" ((← s2.localGet 1 z) == some v)
+    let n2 ← propagate s2 0 1 (fun _ _ => pure ())
+    check "replay applies nothing" (n2 == 0)
+    let view ← readCopy s2 0 1 z
+    check "copy view" (view.value == some v && view.applied > 0 && view.homeTip > 0)
+    s2.close
+    let live ← ShardSet.openMem epoch
+    let _ ← commitCross live [.put a v, .put z w]
+    let mut tasks : List (Task (Except IO.Error Unit)) := []
+    for _ in [0:4] do
+      let t ← IO.asTask (prio := .dedicated) do
+        let _ ← propagate live 0 1 (fun _ _ => pure ())
+      tasks := t :: tasks
+    for t in tasks do
+      match ← IO.wait t with
+      | .ok () => pure ()
+      | .error e => throw e
+    check "four propagators agree" ((← live.localGet 1 z) == some w)
+    live.put a (encodeNat 20)
+    live.put z (encodeNat 0)
+    let zz ← mustFit "zz"
+    live.put zz (encodeNat 1)
+    live.transact a fun tx => do
+      tx.put a (encodeNat 10)
+      tx.enqueue (shardOf tx.bounds z.bytes) (.msg (encodeNat 10)) 0
+    let _ ← propagate live 0 1 fun payload tx => do
+      match ← tx.get zz with
+      | some _ => tx.enqueue 0 (.msg payload) 0
+      | none =>
+          let cur := match ← tx.get z with
+            | some f => decodeNat f |>.getD 0
+            | none => 0
+          match decodeNat payload with
+          | some amt => tx.put z (encodeNat (cur + amt))
+          | none => pure ()
+    check "frozen did not credit" ((← live.get z) == some (encodeNat 0))
+    let _ ← propagate live 1 0 fun payload tx => do
+      let cur := match ← tx.get a with
+        | some f => decodeNat f |>.getD 0
+        | none => 0
+      match decodeNat payload with
+      | some amt => tx.put a (encodeNat (cur + amt))
+      | none => pure ()
+    check "compensated" ((← live.get a) == some (encodeNat 20))
+    live.delete zz
+    live.transact a fun tx => do
+      tx.put a (encodeNat 10)
+      tx.enqueue 1 (.msg (encodeNat 10)) 0
+    let _ ← propagate live 0 1 fun payload tx => do
+      let cur := match ← tx.get z with
+        | some f => decodeNat f |>.getD 0
+        | none => 0
+      match decodeNat payload with
+      | some amt => tx.put z (encodeNat (cur + amt))
+      | none => pure ()
+    check "credit landed" ((← live.get z) == some (encodeNat 10))
+    let again ← propagate live 0 1 fun payload tx => do
+      let cur := match ← tx.get z with
+        | some f => decodeNat f |>.getD 0
+        | none => 0
+      match decodeNat payload with
+      | some amt => tx.put z (encodeNat (cur + amt))
+      | none => pure ()
+    check "credit not doubled" (again == 0 && (← live.get z) == some (encodeNat 10))
+    live.close
+  finally
+    IO.FS.removeDirAll dir
+
 def main : IO UInt32 := do
   testMem
   testCrashCuts
@@ -794,5 +885,6 @@ def main : IO UInt32 := do
   testJobsFeedTtl
   testOccIndex
   testBackupMetrics
+  testCopies
   IO.println "cairn tests ok"
   return 0

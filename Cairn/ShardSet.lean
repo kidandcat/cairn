@@ -217,6 +217,35 @@ def ShardSet.transact {α : Type} (s : ShardSet) (anchor : FitBytes) (f : Tx →
   | .remote _ => throw (IO.userError "remote shard")
   | .missing => throw (IO.userError "shard has no owner")
 
+/-- Like `transact`, on a shard id the caller already chose. -/
+def ShardSet.transactOn {α : Type} (s : ShardSet) (shard : Nat) (f : Tx → IO α) : IO α := do
+  match ← s.locate shard with
+  | .here _ =>
+      let db ← slot s shard
+      let t0 ← IO.monoNanosNow
+      let ans ← db.transactTx shard f
+      let t1 ← IO.monoNanosNow
+      let dt := t1 - t0
+      if txWarnNs < dt then
+        IO.eprintln s!"cairn: transact held shard {shard} for {dt}ns"
+      noteCommit s dt
+      return ans
+  | .remote _ => throw (IO.userError "remote shard")
+  | .missing => throw (IO.userError "shard has no owner")
+
+def ShardSet.localGet (s : ShardSet) (shard : Nat) (k : FitBytes) : IO (Option FitBytes) := do
+  let db ← slot s shard
+  db.get k
+
+def ShardSet.localPrefix (s : ShardSet) (shard : Nat) (pre : Bytes) (after : Option FitBytes)
+    (limit : Nat) : IO (List (FitBytes × FitBytes) × Option FitBytes) := do
+  let db ← slot s shard
+  db.prefix pre after limit
+
+def ShardSet.tip (s : ShardSet) (shard : Nat) : IO UInt64 := do
+  let db ← slot s shard
+  return (← db.snapshot).nextLsn
+
 /-- One key under the same lock as `transact`. Counted like a commit. -/
 def ShardSet.modifyKey {α : Type} (s : ShardSet) (k : FitBytes)
     (f : Option FitBytes → Edit × α) : IO α := do
