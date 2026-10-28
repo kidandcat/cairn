@@ -3,6 +3,7 @@ import Cairn.DB
 import Cairn.Doc
 import Cairn.Feed
 import Cairn.Job
+import Cairn.Occ
 import Cairn.Queue
 import Cairn.Range
 import Cairn.Ulid

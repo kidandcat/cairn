@@ -633,6 +633,37 @@ def testJobsFeedTtl : IO Unit := do
   s2.close
   sq.close
 
+def testOccIndex : IO Unit := do
+  let s ← ShardSet.openMem Epoch.single
+  let k1 ← mustFit "k1"
+  let k2 ← mustFit "k2"
+  let a ← mustFit "a"
+  let b ← mustFit "b"
+  let z ← mustFit "z"
+  s.put k1 a
+  let ok ← occCommit s k1 [⟨k1, some a⟩] [.put k2 b]
+  check "occ commits" ok
+  check "occ wrote k2" ((← s.get k2) == some b)
+  s.put k1 z
+  let no ← occCommit s k1 [⟨k1, some a⟩] [.put k2 a]
+  check "occ rejects a stale read" (!no)
+  check "stale write skipped" ((← s.get k2) == some b)
+  let id : Ulid := ⟨3, 0, by decide, by decide⟩
+  let some ik := Sec.indexKey? ("by-name".toUTF8.toList) ("ada".toUTF8.toList) id
+    | throw (IO.userError "index key")
+  let doc ← mustFit "doc-ada"
+  Sec.put s doc (← mustFit "body") [ik]
+  check "index points at the document" ((← s.get ik) == some doc)
+  let s2 ← ShardSet.openMem { gen := 0, bounds := [[6]] }
+  let crossed ← try
+    Sec.put s2 (← mustFit "a") (← mustFit "a") [ik]
+    pure false
+  catch _ => pure true
+  check "index split refused" crossed
+  check "split document absent" ((← s2.get (← mustFit "a")) == none)
+  s.close
+  s2.close
+
 def main : IO UInt32 := do
   testMem
   testCrashCuts
@@ -647,5 +678,6 @@ def main : IO UInt32 := do
   testRange
   testColl
   testJobsFeedTtl
+  testOccIndex
   IO.println "cairn tests ok"
   return 0

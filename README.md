@@ -140,6 +140,8 @@ lake test
 | `Queue.enqueueWith` / `claim` / `ack` / `nack` | Jobs in key order. Outbox is one batch; a cross-shard batch is refused. |
 | `Ttl.put` / `Ttl.sweep` | Expiry index is the key order under prefix `04`. |
 | `ShardSet.watch` | One shard's log from an LSN, filtered by prefix. No cross-shard order. |
+| `occCommit` | One shard. Writes only if every recorded read still matches. |
+| `Sec.put` | Document and secondary-index keys in one batch. Refused across shards. |
 | `ShardSet.serve` | Handle a `ShardReq` for a shard this host owns. |
 | `ShardSet.publish` | Bump the directory generation and set the owner. Does not move bytes. |
 | `ShardSet.pushLog` | `planCatchup` then `Mailbox.send` for one shard. |
@@ -185,6 +187,7 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 | `Job.claim_blocks`, `Job.claim_spec`, `Job.enqueue_idem`, `outbox_both` | A live lease is not claimed again. The same state claims the same id. An idempotency key is not enqueued twice. One outbox batch shows both keys. |
 | `Feed.visible_mem`, `Feed.visible_since`, `Feed.visible_prefix` | A watch hit is an op in that shard's log at or after the LSN, and the key has the prefix. |
 | `Job.due_mem` | A TTL row is due exactly when its expiry is `≤ now`. |
+| `readsMatch_iff`, `occ_conflict` | The read set matches the map iff every recorded value is still there. A changed key rejects it. |
 | `get_insert`, `get_insert_ne`, `get_remove` | Tree insert and erase have the map equations the list index had. |
 | `key_one_shard`, `shardOf_deterministic`, `shardOf_range` | One shard id per key per bounds, in range, a function of the inputs. |
 | `shardHash_range` | The hash id is `< n` when `n > 0`. |
