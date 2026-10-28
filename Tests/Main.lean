@@ -664,6 +664,43 @@ def testOccIndex : IO Unit := do
   s.close
   s2.close
 
+def testBackupMetrics : IO Unit := do
+  let dir ← IO.FS.createTempDir
+  try
+    let live := FilePath.mk (dir.toString ++ "/live")
+    let db ← DB.openFile live
+    db.putStr "a" "1"
+    db.putStr "b" "2"
+    db.putStr "c" "3"
+    let log ← db.readLog
+    let some mid := log[1]? | throw (IO.userError "short log")
+    let bak := FilePath.mk (dir.toString ++ "/bak")
+    db.backupFile bak mid.lsn
+    let db2 ← DB.openFile bak
+    check "backup kept a" ((← db2.getStr "a") == some "1")
+    check "backup kept b" ((← db2.getStr "b") == some "2")
+    check "backup dropped c" ((← db2.getStr "c") == none)
+    db2.close
+    let task ← db.compactAsync
+    match ← IO.wait task with
+    | .ok () => pure ()
+    | .error e => throw e
+    check "compact kept b" ((← db.getStr "b") == some "2")
+    db.close
+    let s ← ShardSet.openMem Epoch.single
+    let v ← migrate s 2 fun _ => []
+    check "schema version" (v == 2)
+    check "schema reread" (readSchema (← s.get schemaKey) == 2)
+    s.putStr "z" "z"
+    let _ ← s.getStr "z"
+    let c ← s.counts
+    check "commit counted" (c.commits ≥ 1)
+    check "get counted" (c.gets ≥ 1)
+    check "latency recorded" (c.lastCommitNs > 0)
+    s.close
+  finally
+    IO.FS.removeDirAll dir
+
 def main : IO UInt32 := do
   testMem
   testCrashCuts
@@ -679,5 +716,6 @@ def main : IO UInt32 := do
   testColl
   testJobsFeedTtl
   testOccIndex
+  testBackupMetrics
   IO.println "cairn tests ok"
   return 0
