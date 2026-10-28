@@ -262,21 +262,52 @@ private def shardParts (s : ShardSet) : IO (List (List (FitBytes × FitBytes))) 
   return parts
 
 /--
-Sorted merge of one snapshot per shard, then the page. A prefix may cross
-shards. Each snapshot is that shard at the moment it was read. There is no
+One page from each shard, then the merged page.
+
+A local shard walks its tree from the lower bound and stops at `limit`
+(`DB.range`). A remote shard still sends a full snapshot; only the first
+`limit` hits are kept. `take_mergeAll` says that page is the page of the full
+hit lists. Each snapshot is that shard at the moment it was read. There is no
 global snapshot. The cursor is a key, so the next call passes it as `after`.
 -/
+private def shardLimited (s : ShardSet) (limit : Nat)
+    (localPage : DB → IO (List (FitBytes × FitBytes)))
+    (remoteKeep : FitBytes → Bool) : IO (List (List (FitBytes × FitBytes))) := do
+  let e ← s.epoch.get
+  let n := e.bounds.length + 1
+  let mut parts : List (List (FitBytes × FitBytes)) := []
+  for i in [0:n] do
+    match ← s.locate i with
+    | .here _ =>
+        let db ← slot s i
+        parts := parts ++ [← localPage db]
+    | .remote leader =>
+        match ← (← s.remote.get) leader .snapshot with
+        | .view es => parts := parts ++ [(hits es remoteKeep).take limit]
+        | .err msg => throw (IO.userError msg)
+        | _ => throw (IO.userError "bad reply")
+    | .missing => throw (IO.userError "shard has no owner")
+  return parts
+
 def ShardSet.range (s : ShardSet) (lo hi after : Option FitBytes) (limit : Nat) :
     IO (List (FitBytes × FitBytes) × Option FitBytes) := do
-  let parts ← shardParts s
-  let rows := mergeAll (parts.map fun p => hits p (inRange lo hi after))
-  return (rows.take limit, pageCursor limit rows)
+  let parts ← shardLimited s limit
+    (fun db => do
+      let (page, _) ← db.range lo hi after limit
+      return page)
+    (inRange lo hi after)
+  let page := (mergeAll parts).take limit
+  return (page, pageCursor limit page)
 
 def ShardSet.prefix (s : ShardSet) (pre : Bytes) (after : Option FitBytes) (limit : Nat) :
     IO (List (FitBytes × FitBytes) × Option FitBytes) := do
-  let parts ← shardParts s
-  let rows := mergeAll (parts.map fun part => hits part (inPrefix pre after))
-  return (rows.take limit, pageCursor limit rows)
+  let parts ← shardLimited s limit
+    (fun db => do
+      let (page, _) ← db.prefix pre after limit
+      return page)
+    (inPrefix pre after)
+  let page := (mergeAll parts).take limit
+  return (page, pageCursor limit page)
 
 def ShardSet.iterate (s : ShardSet) : IO (List (FitBytes × FitBytes)) := do
   return mergeAll (← shardParts s)

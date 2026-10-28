@@ -11,8 +11,11 @@ shard (`mergeAll`) and then takes the page. That merge is not a global snapshot.
 
 import Cairn.Map
 import Cairn.ShardModel
+import Std.Data.TreeMap.Slice
+import Init.Data.Iterators.Combinators.Take
+import Init.Data.Iterators.Lemmas.Combinators.Take
 
-open Std
+open Std Iterators
 
 namespace Cairn
 
@@ -62,10 +65,78 @@ def prefixPage (m : Map) (p : Bytes) (after : Option FitBytes) (limit : Nat) :
     List (FitBytes × FitBytes) :=
   takePage (prefixHits m p after) limit
 
+/-!
+The page a caller sees. `rangePage` / `prefixPage` stay the specification
+(a filtered `entries` list). These walk the tree from the lower bound and
+stop after `limit` entries. The equality proofs are below.
+-/
+
+private def takeIter {α β} [Iterator α Id β] [Finite α Id] (it : Iter (α := α) β) (limit : Nat) :
+    List β :=
+  (it.take limit).toList
+
+def treeGE (m : Map) (lo : FitBytes) (limit : Nat) : List (FitBytes × FitBytes) :=
+  takeIter (m[lo...*]).iter limit
+
+def treeGT (m : Map) (lo : FitBytes) (limit : Nat) : List (FitBytes × FitBytes) :=
+  takeIter (m[lo<...*]).iter limit
+
+def treeLT (m : Map) (hi : FitBytes) (limit : Nat) : List (FitBytes × FitBytes) :=
+  takeIter (m[*...<hi]).iter limit
+
+def treeGE_LT (m : Map) (lo hi : FitBytes) (limit : Nat) : List (FitBytes × FitBytes) :=
+  takeIter (m[lo...<hi]).iter limit
+
+def treeGT_LT (m : Map) (lo hi : FitBytes) (limit : Nat) : List (FitBytes × FitBytes) :=
+  takeIter (m[lo<...hi]).iter limit
+
+def treeHead (m : Map) (limit : Nat) : List (FitBytes × FitBytes) :=
+  takeIter m.iter limit
+
+theorem treeGE_eq (m : Map) (lo : FitBytes) (limit : Nat) :
+    treeGE m lo limit =
+      ((entries m).filter (fun e => (cmpKey e.1 lo).isGE)).take limit := by
+  simp [treeGE, takeIter, entries, Std.TreeMap.toList_rci]
+
+theorem treeGT_eq (m : Map) (lo : FitBytes) (limit : Nat) :
+    treeGT m lo limit =
+      ((entries m).filter (fun e => (cmpKey e.1 lo).isGT)).take limit := by
+  simp [treeGT, takeIter, entries, Std.TreeMap.toList_roi]
+
+theorem treeLT_eq (m : Map) (hi : FitBytes) (limit : Nat) :
+    treeLT m hi limit =
+      ((entries m).filter (fun e => (cmpKey e.1 hi).isLT)).take limit := by
+  simp [treeLT, takeIter, entries, Std.TreeMap.toList_rio]
+
+@[simp] private theorem decide_eq_isLT (o : Ordering) : decide (o = .lt) = o.isLT := by
+  cases o <;> rfl
+
+@[simp] private theorem decide_eq_isGT (o : Ordering) : decide (o = .gt) = o.isGT := by
+  cases o <;> rfl
+
+theorem treeGE_LT_eq (m : Map) (lo hi : FitBytes) (limit : Nat) :
+    treeGE_LT m lo hi limit =
+      ((entries m).filter (fun e => (cmpKey e.1 lo).isGE && (cmpKey e.1 hi).isLT)).take limit := by
+  simp [treeGE_LT, takeIter, entries, Std.TreeMap.toList_rco]
+
+theorem treeGT_LT_eq (m : Map) (lo hi : FitBytes) (limit : Nat) :
+    treeGT_LT m lo hi limit =
+      ((entries m).filter (fun e => (cmpKey e.1 lo).isGT && (cmpKey e.1 hi).isLT)).take limit := by
+  simp [treeGT_LT, takeIter, entries, Std.TreeMap.toList_roo]
+
+theorem treeHead_eq (m : Map) (limit : Nat) :
+    treeHead m limit = (entries m).take limit := by
+  simp [treeHead, takeIter, entries, Std.TreeMap.toList_iter]
+
 /-- `none` when the page is shorter than `limit` (nothing left). Otherwise the last key. -/
 def pageCursor (limit : Nat) (rows : List (FitBytes × FitBytes)) : Option FitBytes :=
   let took := rows.take limit
   if took.length < limit then none else took.getLast?.map (·.1)
+
+/-- The cursor of a page is the cursor of the list it was taken from. -/
+theorem pageCursor_page (limit : Nat) (rows : List (FitBytes × FitBytes)) :
+    pageCursor limit (rows.take limit) = pageCursor limit rows := by
+  simp [pageCursor, List.take_take]
 
 theorem hits_mem (rows : List (FitBytes × FitBytes)) (keep : FitBytes → Bool)
     (e : FitBytes × FitBytes) :
