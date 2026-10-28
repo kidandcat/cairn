@@ -27,6 +27,7 @@ files are not rewritten.
 
 import Cairn.DB
 import Cairn.Directory
+import Cairn.Feed
 import Cairn.ShardModel
 
 open System
@@ -169,6 +170,22 @@ def ShardSet.commitMany (s : ShardSet) (batches : List (List Op)) : IO Unit := d
           | .err msg => throw (IO.userError msg)
           | _ => throw (IO.userError "bad reply")
       | .missing => throw (IO.userError "shard has no owner")
+
+def ShardSet.transact {α : Type} (s : ShardSet) (k : FitBytes)
+    (f : View → IO (List Op × α)) : IO α := do
+  let id ← s.shardId k
+  match ← s.locate id with
+  | .here _ =>
+      let db ← slot s id
+      db.transact f
+  | .remote _ => throw (IO.userError "remote shard")
+  | .missing => throw (IO.userError "shard has no owner")
+
+def ShardSet.watch (s : ShardSet) (shard : Nat) (fromLsn : UInt64) (pre : Bytes) :
+    IO (List (UInt64 × Op)) := do
+  let db ← slot s shard
+  let log ← db.readLog
+  return Feed.visible fromLsn pre log
 
 def ShardSet.put (s : ShardSet) (k v : FitBytes) : IO Unit :=
   s.commit [.put k v]

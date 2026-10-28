@@ -134,6 +134,22 @@ private def commitManyNow (db : DB) (batches : List (List Op)) : IO Unit := do
 def DB.commit (db : DB) (ops : List Op) : IO Unit :=
   db.writer.atomically fun _ => liftM (commitNow db ops)
 
+/--
+Run `f` under the writer lock on the current view. The ops it returns are
+one batch. Empty ops publish nothing. `commitNow` still rejects a batch
+whose keys are not in this shard.
+-/
+def DB.transact {α : Type} (db : DB) (f : View → IO (List Op × α)) : IO α :=
+  db.writer.atomically fun _ => liftM do
+    if ← db.closed.get then
+      throw (IO.userError "closed")
+    let v ← db.view.get
+    let (ops, ans) ← f v
+    if ops.isEmpty then
+      return ans
+    commitNow db ops
+    return ans
+
 inductive Edit where
   | keep
   | put (v : FitBytes)

@@ -1,6 +1,9 @@
 import Cairn.Coll
 import Cairn.DB
 import Cairn.Doc
+import Cairn.Feed
+import Cairn.Job
+import Cairn.Queue
 import Cairn.Range
 import Cairn.Ulid
 import Cairn.Cluster

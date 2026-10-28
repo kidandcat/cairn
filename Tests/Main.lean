@@ -576,6 +576,63 @@ def testColl : IO Unit := do
   check "gen rest empty" (rest.isEmpty)
   s.close
 
+def testJobsFeedTtl : IO Unit := do
+  let s ← ShardSet.openMem Epoch.single
+  let anchor ← mustFit "doc"
+  let id1 : Ulid := ⟨1, 0, by decide, by decide⟩
+  let id2 : Ulid := ⟨2, 0, by decide, by decide⟩
+  Queue.enqueueWith s anchor [.put anchor (← mustFit "v")] 1 0 id1 [9]
+  check "outbox doc" ((← s.get anchor) != none)
+  let claimed ← Queue.claim s 0 50
+  check "claim one" (claimed == some (id1, [9]))
+  check "lease holds" ((← Queue.claim s 10 50) == none)
+  check "lease ends" ((← Queue.claim s 50 50) == some (id1, [9]))
+  Queue.ack s 1 0 id1
+  check "acked" ((← Queue.claim s 1000 10) == none)
+  Queue.enqueue s 1 0 id2 [4]
+  let nackClaim ← Queue.claim s 0 10
+  check "nack target" (nackClaim == some (id2, [4]))
+  Queue.nack s 1 0 id2 0 3
+  check "waiting" ((← Queue.claim s 0 10) == none)
+  let events ← s.watch 0 0 []
+  check "feed nonempty" (!events.isEmpty)
+  check "feed from later" ((← s.watch 0 1000 []).length < events.length)
+  Ttl.put s 5 id1 [1]
+  Ttl.put s 80 id2 [2]
+  check "sweep" ((← Ttl.sweep s 10) == 1)
+  let s2 ← ShardSet.openMem { gen := 0, bounds := [[4]] }
+  let crossed ← try
+    Queue.enqueueWith s2 anchor [.put anchor anchor] 1 0 id1 [1]
+    pure false
+  catch _ => pure true
+  check "outbox split refused" crossed
+  check "split wrote nothing" ((← s2.get anchor) == none)
+  let sq ← ShardSet.openMem Epoch.single
+  for i in [0:8] do
+    let t := 20 + i
+    if ht : t < 2 ^ 48 then
+      Queue.enqueue sq 1 0 ⟨t, 1, ht, by decide⟩ [UInt8.ofNat i]
+  let mut tasks : List (Task (Except IO.Error (List Ulid))) := []
+  for _ in [0:4] do
+    let t ← IO.asTask (prio := .dedicated) do
+      let mut got : List Ulid := []
+      for _ in [0:8] do
+        match ← Queue.claim sq 0 100000 with
+        | some (id, _) => got := id :: got
+        | none => pure ()
+      return got
+    tasks := t :: tasks
+  let mut all : List Ulid := []
+  for t in tasks do
+    match ← IO.wait t with
+    | .ok ids => all := ids ++ all
+    | .error e => throw e
+  check "eight claims" (all.length == 8)
+  check "no double claim" (all.eraseDups.length == 8)
+  s.close
+  s2.close
+  sq.close
+
 def main : IO UInt32 := do
   testMem
   testCrashCuts
@@ -589,5 +646,6 @@ def main : IO UInt32 := do
   testShardStress
   testRange
   testColl
+  testJobsFeedTtl
   IO.println "cairn tests ok"
   return 0
