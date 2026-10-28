@@ -34,12 +34,19 @@ open System
 
 namespace Cairn
 
+structure Counts where
+  gets : Nat
+  commits : Nat
+  lastCommitNs : Nat
+  deriving Repr, Inhabited
+
 structure ShardSet where
   host : HostId
   epoch : IO.Ref Epoch
   directory : IO.Ref Directory
   slots : Array (Option DB)
   remote : IO.Ref (NodeId → ShardReq → IO ShardResp)
+  meter : IO.Ref Counts
 
 def ShardSet.shardCount (s : ShardSet) : Nat :=
   s.slots.size
@@ -52,7 +59,8 @@ private def fresh (epoch : Epoch) (host : HostId) (slots : Array (Option DB))
   let epochRef ← IO.mkRef epoch
   let directory ← IO.mkRef dir
   let remote ← IO.mkRef rejectRemote
-  return { host, epoch := epochRef, directory, slots, remote }
+  let meter ← IO.mkRef (default : Counts)
+  return { host, epoch := epochRef, directory, slots, remote, meter }
 
 /-- Every shard of `epoch` is a memory `DB` on `host`. `epoch.bounds.length + 1` shards. -/
 def ShardSet.openMem (epoch : Epoch) (host : HostId := { n := 0 }) : IO ShardSet := do
@@ -118,7 +126,19 @@ def ShardSet.serve (s : ShardSet) (shard : Nat) (req : ShardReq) : IO ShardResp 
   | .remote _ => return .err "not the owner"
   | .missing => return .err "shard has no owner"
 
+def ShardSet.counts (s : ShardSet) : IO Counts :=
+  s.meter.get
+
+private def noteGet (s : ShardSet) : IO Unit := do
+  let c ← s.meter.get
+  s.meter.set { c with gets := c.gets + 1 }
+
+private def noteCommit (s : ShardSet) (ns : Nat) : IO Unit := do
+  let c ← s.meter.get
+  s.meter.set { c with commits := c.commits + 1, lastCommitNs := ns }
+
 def ShardSet.get (s : ShardSet) (k : FitBytes) : IO (Option FitBytes) := do
+  noteGet s
   let id ← s.shardId k
   match ← s.locate id with
   | .here _ =>
@@ -142,7 +162,10 @@ def ShardSet.commit (s : ShardSet) (ops : List Op) : IO Unit := do
       match ← s.locate id with
       | .here _ =>
           let db ← slot s id
+          let t0 ← IO.monoNanosNow
           db.commit ops
+          let t1 ← IO.monoNanosNow
+          noteCommit s (t1 - t0)
       | .remote leader =>
           match ← (← s.remote.get) leader (.commit ops) with
           | .ack => pure ()
