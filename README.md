@@ -15,7 +15,7 @@ This is not a SQL database.
 - The frame checksum is non-reflected CRC-32, polynomial `0x04C11DB7`, init 0, no final xor (`sum32`). Proved: every error whose set bits lie in some window of 32 consecutive positions, at every message length. A one-bit error is that window with width 1. Two bits at distance 1 to 31 are the same window. Proved false: that every odd-weight error is detected (`sum32 [1, 4, 0xC1, 0x1D, 0xB7] = 0`, Hamming weight 15). Not proved: two bits farther apart. No fixed-width checksum rejects every altered string.
 - A torn tail is truncated. A bad frame with a later valid frame is `corrupt log` and `openFile` throws. `openFileRepair` truncates that damage on purpose. A file that is not a cairn file is left in place. None of these paths drops a bad frame silently.
 - Each record still carries the reflected ISO CRC-32 (`crc32`). That is a different function from the frame checksum.
-- `kill -9` is not a power loss. One run of `scripts/crash_demo.sh` on this machine recovered 147 keys, a prefix of the writes. A later run recovered 144 keys, also a prefix. The process was killed; the disk was not.
+- `kill -9` is not a power loss. One run of `scripts/crash_demo.sh` on this machine recovered 147 keys, a prefix of the writes. A later run recovered 144 keys, also a prefix. A run after the tree range walk recovered 153 keys, also a prefix. The process was killed; the disk was not.
 - Inside one shard the admission order of that shard's mutex is the serial order (`shard_hist_serial`, which is `state_eq_serial` on that shard's `Hist`). Two commits on different shards commute (`steps_commute`). There is no global snapshot and no serial order across shards.
 - `ShardSet.iterate` is the sorted merge of one snapshot per shard (`mergeAll`, `clusterEntries`). Each snapshot is that shard's `View` at the moment it was read. A commit on another shard can land between those reads. `cluster_partition` says that merging the home shards of one map returns exactly that map's entries. The runtime merge is of the views that were actually read, which need not be one moment.
 - A batch whose keys fall in more than one shard is rejected. The id a single-shard batch is sent to is `shardOf` of its key (`route_is_shardOf`).
@@ -148,7 +148,7 @@ lake test
 | `ShardSet.publish` | Bump the directory generation and set the owner. Does not move bytes. |
 | `ShardSet.pushLog` | `planCatchup` then `Mailbox.send` for one shard. |
 
-Reads do not take the mutex. `get` is one `Ref.get` plus a tree lookup. `ShardSet.iterate` does one such read per shard, in shard-id order, with no lock across them. `range` and `prefix` do the same reads and then keep the keys inside the interval. The memory backend appends by consing a frame. `readAll` joins those chunks. The record list in the `View` is newest-first for the same reason.
+Reads do not take the mutex. `get` is one `Ref.get` plus a tree lookup. `ShardSet.iterate` does one such read per shard, in shard-id order, with no lock across them. `range` and `prefix` walk that shard's tree from the lower bound and stop after `limit` (`rangeWalk`, `prefixWalk`). A remote shard still returns a full snapshot; only the first `limit` hits of that list are merged. `take_mergeAll` is why the merged page matches the page of the full hit lists. The memory backend appends by consing a frame. `readAll` joins those chunks. The record list in the `View` is newest-first for the same reason.
 
 ## Collections
 
@@ -182,6 +182,9 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 | `compact_eq`, `compact_roundtrip` | Compaction replays to the same `entries`, including through the codec. Not the same tree shape. |
 | `entries_sorted`, `entries_nodup`, `entries_of_get` | Iteration is sorted by key bytes, lists each key once, and agrees with `get`. |
 | `rangeHits_mem`, `prefixHits_mem`, `rangeHits_sorted`, `rangeHits_nodup`, `prefixHits_sorted`, `prefixHits_nodup` | A range or prefix is exactly the entries inside the interval, in order, each key once. |
+| `rangeWalk_eq`, `prefixWalk_eq`, `rangeWalk_cursor`, `prefixWalk_cursor` | The tree page, stopped after `limit`, is that filtered page, and its cursor is the full list's cursor. |
+| `isPrefixOf_iff_bounds` | Keys with byte prefix `p` are the half-open interval from `p` to `prefixSucc p`. |
+| `take_mergeAll` | The first `limit` rows of a merge are the merge of each part's first `limit` rows. |
 | `resume_hits`, `resume_prefix` | The next page, using the cursor, is the tail of that hit list. |
 | `mergedHits_mem` | A merged page contains an entry iff some shard snapshot did and the predicate matches. |
 | `Ulid.encode_lt_of_lt`, `Ulid.fresh_increases` | Byte order follows time order. The pure id step is strictly increasing. |
@@ -210,7 +213,7 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 
 `#print axioms` on `sum32_burst`, `sum32_detects_burst`, `recovery_keeps_synced`, `decodeFile_prefix`, and `recovery_prefix` reports `propext`, `Quot.sound`, and `Classical.choice`.
 
-Not proved: a big-O bound on the tree. `Std.TreeMap` keeps the size-balance invariant (delta 3, ratio 2) inside the library; cairn proves the `get` / `insert` / `erase` equations and that `entries` is the sorted binding list. Not proved: that `IO.Ref.set` is atomic, that the mutex admits no two critical sections, that the C shim's `fdatasync` / `fsync` / `rename` match POSIX (the calls are what `strace` showed; the kernel's meaning is assumed), that `sum32` detects every change, two-bit errors farther than 31 bits, or anything about a network. The byte-prefix theorems are about a prefix of a well-formed encoding. A checksum collision can append a frame that is not a prefix; that is outside the theorem. The crash-cut test checks a sample of indexes (`sampleCuts`: the first 80 bytes, the 4096-byte edges, and the offsets 17 and 40 into each frame). The proof is for every index.
+Not proved: a big-O bound on the tree. `rangeWalk_eq` equates the page to the filtered list; the walk is `Std.TreeMap`'s zipper, which stops after `limit`, and cairn does not prove the height. `Std.TreeMap` keeps the size-balance invariant (delta 3, ratio 2) inside the library; cairn proves the `get` / `insert` / `erase` equations and that `entries` is the sorted binding list. Not proved: that `IO.Ref.set` is atomic, that the mutex admits no two critical sections, that the C shim's `fdatasync` / `fsync` / `rename` match POSIX (the calls are what `strace` showed; the kernel's meaning is assumed), that `sum32` detects every change, two-bit errors farther than 31 bits, or anything about a network. The byte-prefix theorems are about a prefix of a well-formed encoding. A checksum collision can append a frame that is not a prefix; that is outside the theorem. The crash-cut test checks a sample of indexes (`sampleCuts`: the first 80 bytes, the 4096-byte edges, and the offsets 17 and 40 into each frame). The proof is for every index.
 
 ## What is tested
 
@@ -292,7 +295,33 @@ mem-prefix-pages ops=1000  1006ns/op 994035ops/s  883ns/op 1132502ops/s  917ns/o
 mem-claim-100 ops=100  178963ns/op 5587ops/s  181739ns/op 5502ops/s  179097ns/op 5583ops/s
 ```
 
-`mem-claim-100` enqueues 100 jobs outside the clock, then claims each. About 0.18 ms per claim is another scan of the prefix. The file rows of that run stayed on `fdatasync` (one shard about 0.16–0.37 ms/op).
+`mem-claim-100` enqueues 100 jobs outside the clock, then claims each. About 0.18 ms per claim was another scan of the prefix. The file rows of that run stayed on `fdatasync` (one shard about 0.16–0.37 ms/op).
+
+`cairn-scale-bench` is the before/after pair for the tree lower bound. Ten pages of 100 keys, and twenty claims, with the fill outside the clock. Three repetitions, total nanoseconds, not averaged. Same machine as above.
+
+Filter (the entry list):
+
+```
+prefix-pages n=1000 pages=10  500492ns  466960ns  449819ns
+claim n=1000 takes=20  1797119ns  1893193ns  1742987ns
+prefix-pages n=10000 pages=10  13078117ns  8042702ns  12331033ns
+claim n=10000 takes=20  16361743ns  16722090ns  14686359ns
+prefix-pages n=100000 pages=10  110819467ns  108574008ns  125024519ns
+claim n=100000 takes=20  167798621ns  172838368ns  175225740ns
+```
+
+Tree walk:
+
+```
+prefix-pages n=1000 pages=10  177897ns  181377ns  159859ns
+claim n=1000 takes=20  1259110ns  1132926ns  1072969ns
+prefix-pages n=10000 pages=10  216441ns  200111ns  204997ns
+claim n=10000 takes=20  2109340ns  1297754ns  1317937ns
+prefix-pages n=100000 pages=10  219607ns  220689ns  245824ns
+claim n=100000 takes=20  2075694ns  2100954ns  1406594ns
+```
+
+At 100000 keys the ten pages drop from about 110–125 ms to about 0.22–0.25 ms, and the twenty claims from about 168–175 ms to about 1.4–2.1 ms. The prefix time barely moves from 1000 keys to 100000. That is a measurement. The big-O bound is not a theorem.
 
 ## Building
 
@@ -303,6 +332,7 @@ lake test
 ./.lake/build/bin/cairn-bench
 ./.lake/build/bin/cairn-durable-bench
 ./.lake/build/bin/cairn-design-bench
+./.lake/build/bin/cairn-scale-bench
 ./.lake/build/bin/cairn-backend
 ```
 

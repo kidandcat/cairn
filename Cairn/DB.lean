@@ -21,6 +21,7 @@ import Std.Sync.Mutex
 import Cairn.Store
 import Cairn.Log
 import Cairn.Range
+import Cairn.RangeWalk
 import Cairn.Router
 import Cairn.Transport
 
@@ -60,14 +61,14 @@ One snapshot. Inclusive `lo`, exclusive `hi`, strict `after` cursor.
 -/
 def DB.range (db : DB) (lo hi after : Option FitBytes) (limit : Nat) :
     IO (List (FitBytes × FitBytes) × Option FitBytes) := do
-  let rows := rangeHits (← db.snapshot).index lo hi after
-  return (rows.take limit, pageCursor limit rows)
+  let page := rangeWalk (← db.snapshot).index lo hi after limit
+  return (page, pageCursor limit page)
 
 /-- Keys whose bytes start with `p`, same cursor rule as `range`. -/
 def DB.prefix (db : DB) (p : Bytes) (after : Option FitBytes) (limit : Nat) :
     IO (List (FitBytes × FitBytes) × Option FitBytes) := do
-  let rows := prefixHits (← db.snapshot).index p after
-  return (rows.take limit, pageCursor limit rows)
+  let page := prefixWalk (← db.snapshot).index p after limit
+  return (page, pageCursor limit page)
 
 def DB.readLog (db : DB) : IO (List Record) := do
   return (← db.snapshot).records

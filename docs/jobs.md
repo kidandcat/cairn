@@ -6,7 +6,7 @@ Informe de la fase 2. La cola es persistente. El outbox es un solo lote. El feed
 
 `Queue.enqueueWith` mete las ops del llamador y el `put` del job en un mismo lote. Si `sameShard` es falso, lanza `outbox crossed a shard` y no publica nada. Con un solo shard siempre cabe. Con bounds, la clave del job (prefijo `03`) y la clave del cambio tienen que caer en el mismo id. No hay transacción entre shards.
 
-El índice de TTL es el orden de la clave bajo el prefijo `04` (caducidad en big-endian, luego el id). `Ttl.sweep` borra las que tienen caducidad `≤ now` y se detiene en la primera posterior.
+El índice de TTL es el orden de la clave bajo el prefijo `04` (caducidad en big-endian, luego el id). `Ttl.sweep` borra las que tienen caducidad `≤ now` y se detiene en la primera posterior. `claim` y `sweep` piden páginas de 32 al `prefix` del shard. Desde el lower bound del árbol, cada página es el corte de `prefixWalk`, no un filtro de toda la cola. `Job.claim_spec` y `Job.claim_blocks` siguen siendo el modelo puro de la fila, no del árbol.
 
 `ShardSet.watch shard fromLsn prefix` lee el log de ese shard. El orden es el de admisión de ese shard. No hay un orden entre shards.
 

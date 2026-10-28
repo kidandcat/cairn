@@ -540,6 +540,26 @@ def testRange : IO Unit := do
   check "second cursor" (done == none)
   let (pref, _) ← db.prefix ("a".toUTF8.toList) none 10
   check "prefix" (pref.map (·.1.bytes) == ["a".toUTF8.toList, "ab".toUTF8.toList, "ac".toUTF8.toList])
+  let ff : FitBytes := ⟨[0x61, 0xFF], by decide⟩
+  db.put ff ff
+  let (around, _) ← db.prefix ("a".toUTF8.toList) none 10
+  check "prefix covers ff" (around.any fun e => e.1.bytes == [0x61, 0xFF])
+  check "prefix stops before b" (!around.any fun e => e.1.bytes == "b".toUTF8.toList)
+  for i in [0:40] do
+    let k : FitBytes := ⟨[1, UInt8.ofNat i], by
+      rw [List.length_cons, List.length_cons, List.length_nil]
+      decide⟩
+    db.put k k
+  let mut got : List Bytes := []
+  let mut cursor : Option FitBytes := none
+  for _ in [0:10] do
+    let (page, next) ← db.prefix [1] cursor 7
+    got := got ++ page.map (·.1.bytes)
+    cursor := next
+    if next == none then break
+  check "paged count" (got.length == 40)
+  check "paged order" (got == (List.range 40).map fun i => [1, UInt8.ofNat i])
+  check "paged done" (cursor == none)
   db.close
 
 def testColl : IO Unit := do

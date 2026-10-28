@@ -174,6 +174,136 @@ theorem mergeAll_sorted (ps : List (List (FitBytes × FitBytes)))
       exact mergeTwo_sorted p (mergeAll ps) (h p (List.mem_cons_self ..))
         (ih fun q hq => h q (List.mem_cons_of_mem _ hq))
 
+/-!
+A merged page only needs the first `limit` rows of each part. Anything past that
+already has `limit` predecessors in its own part, and `List.merge` keeps that
+order, so it cannot land in the merged page.
+-/
+
+private theorem merge_cons_cons {α : Type} (le : α → α → Bool) (x y : α) (xs ys : List α) :
+    List.merge (x :: xs) (y :: ys) le =
+      if le x y then x :: List.merge xs (y :: ys) le
+      else y :: List.merge (x :: xs) ys le := by
+  conv =>
+    lhs
+    unfold List.merge
+
+private theorem take_merge_append_right {α : Type} (le : α → α → Bool) (n : Nat)
+    (bs as : List α) (z : α) (h : n ≤ as.length) :
+    (List.merge bs (as ++ [z]) le).take n = (List.merge bs as le).take n := by
+  induction n generalizing bs as with
+  | zero => simp
+  | succ n ih =>
+      match as with
+      | [] => simp at h
+      | a :: as =>
+          have h' : n ≤ as.length := Nat.le_of_succ_le_succ h
+          match bs with
+          | [] =>
+              simp [List.take_append_of_le_length h', List.take_succ_cons]
+          | b :: bs =>
+              have happend : (a :: as) ++ [z] = a :: (as ++ [z]) := rfl
+              rw [happend]
+              have hL := merge_cons_cons le b a bs (as ++ [z])
+              have hR := merge_cons_cons le b a bs as
+              rw [hL, hR]
+              split
+              · next hcond =>
+                  simp only [hcond, List.take_succ_cons]
+                  exact congrArg (b :: ·) (ih bs (a :: as) (Nat.le_succ_of_le h'))
+              · next hcond =>
+                  simp only [hcond, List.take_succ_cons]
+                  exact congrArg (a :: ·) (ih (b :: bs) as h')
+
+private theorem take_merge_append_left {α : Type} (le : α → α → Bool) (n : Nat)
+    (as bs : List α) (z : α) (h : n ≤ as.length) :
+    (List.merge (as ++ [z]) bs le).take n = (List.merge as bs le).take n := by
+  induction n generalizing as bs with
+  | zero => simp
+  | succ n ih =>
+      match as with
+      | [] => simp at h
+      | a :: as =>
+          have h' : n ≤ as.length := Nat.le_of_succ_le_succ h
+          match bs with
+          | [] =>
+              simp [List.take_append_of_le_length h', List.take_succ_cons]
+          | b :: bs =>
+              have happend : (a :: as) ++ [z] = a :: (as ++ [z]) := rfl
+              rw [happend]
+              have hL := merge_cons_cons le a b (as ++ [z]) bs
+              have hR := merge_cons_cons le a b as bs
+              rw [hL, hR]
+              split
+              · next hcond =>
+                  simp only [hcond, List.take_succ_cons]
+                  exact congrArg (a :: ·) (ih as (b :: bs) h')
+              · next hcond =>
+                  simp only [hcond, List.take_succ_cons]
+                  exact congrArg (b :: ·) (ih (a :: as) bs (Nat.le_trans h' (Nat.le_succ as.length)))
+
+private theorem take_merge_lists {α : Type} (le : α → α → Bool) (n : Nat) (xs ys : List α) :
+    (List.merge xs ys le).take n = (List.merge (xs.take n) (ys.take n) le).take n := by
+  induction n generalizing xs ys with
+  | zero => simp
+  | succ n ih =>
+      match xs, ys with
+      | [], ys =>
+          simp [List.take_take, Nat.min_self]
+      | x :: xs, [] =>
+          simp [List.take_take, Nat.min_self, List.take_succ_cons]
+      | x :: xs, y :: ys =>
+          simp only [List.take_succ_cons]
+          have hL := merge_cons_cons le x y xs ys
+          have hR := merge_cons_cons le x y (xs.take n) (ys.take n)
+          rw [hL, hR]
+          cases hle : le x y with
+          | true =>
+              simp only [ite_true, List.take_succ_cons]
+              congr 1
+              rw [ih xs (y :: ys)]
+              cases n with
+              | zero => simp
+              | succ m =>
+                  simp only [List.take_succ_cons]
+                  by_cases hlen : m < ys.length
+                  · have hget := List.take_append_getElem (l := ys) (i := m) hlen
+                    have happ := take_merge_append_right le (m + 1) (xs.take (m + 1))
+                      (y :: ys.take m) ys[m] (by simp; omega)
+                    simpa [hget, List.cons_append] using happ.symm
+                  · have hle' : ys.length ≤ m := Nat.le_of_not_gt hlen
+                    simp [List.take_of_length_le hle', List.take_of_length_le (Nat.le_succ_of_le hle')]
+          | false =>
+              simp only [Bool.false_eq_true, ite_false, List.take_succ_cons]
+              congr 1
+              rw [ih (x :: xs) ys]
+              cases n with
+              | zero => simp
+              | succ m =>
+                  simp only [List.take_succ_cons]
+                  by_cases hlen : m < xs.length
+                  · have hget := List.take_append_getElem (l := xs) (i := m) hlen
+                    have happ := take_merge_append_left le (m + 1) (x :: xs.take m)
+                      (ys.take (m + 1)) xs[m] (by simp; omega)
+                    simpa [hget, List.cons_append] using happ.symm
+                  · have hle' : xs.length ≤ m := Nat.le_of_not_gt hlen
+                    simp [List.take_of_length_le hle', List.take_of_length_le (Nat.le_succ_of_le hle')]
+
+theorem take_mergeTwo (n : Nat) (xs ys : List (FitBytes × FitBytes)) :
+    (mergeTwo xs ys).take n = (mergeTwo (xs.take n) (ys.take n)).take n := by
+  simpa [mergeTwo] using take_merge_lists keyLe n xs ys
+
+theorem take_mergeAll (n : Nat) (ps : List (List (FitBytes × FitBytes))) :
+    (mergeAll ps).take n = (mergeAll (ps.map (·.take n))).take n := by
+  induction ps with
+  | nil => simp [mergeAll]
+  | cons p ps ih =>
+      simp only [List.map_cons, mergeAll]
+      rw [take_mergeTwo n p (mergeAll ps), ih]
+      have h := take_mergeTwo n (p.take n) (mergeAll (ps.map (·.take n)))
+      simp only [List.take_take, Nat.min_self] at h
+      exact h.symm
+
 /-- Sorted merge of one snapshot per part. This is the global iterate. -/
 def clusterEntries (parts : List Map) : List (FitBytes × FitBytes) :=
   mergeAll (parts.map entries)
