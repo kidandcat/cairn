@@ -1,4 +1,8 @@
+import Cairn.Coll
 import Cairn.DB
+import Cairn.Doc
+import Cairn.Range
+import Cairn.Ulid
 import Cairn.Cluster
 import Cairn.Directory
 import Cairn.ShardModel

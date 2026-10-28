@@ -40,3 +40,6 @@ lean_exe «cairn-crash-writer» where
 
 lean_exe «cairn-recover» where
   root := `Demo.Recover
+
+lean_exe «cairn-backend» where
+  root := `Demo.Backend

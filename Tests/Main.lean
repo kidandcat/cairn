@@ -512,6 +512,70 @@ def testShardStress : IO Unit := do
   check "stress iterate is the merge" ((← s.iterate) == mergeAll parts)
   check "stress iterate sorted" (isSorted (← s.iterate))
 
+def earlyId : Ulid :=
+  ⟨1, 0, by decide, by decide⟩
+
+def lateId : Ulid :=
+  ⟨5000, 0, by decide, by decide⟩
+
+def requireKey (name : String) (id : Ulid) : IO FitBytes := do
+  match docKey? (name.toUTF8.toList) id with
+  | some k => return k
+  | none => throw (IO.userError "key")
+
+def testRange : IO Unit := do
+  let db ← DB.openMem
+  for s in ["a", "b", "c", "d", "ab", "ac"] do
+    db.putStr s s
+  let b ← mustFit "b"
+  let d ← mustFit "d"
+  let (mid, cur) ← db.range (some b) (some d) none 10
+  check "range keys" (mid.map (·.1.bytes) == ["b".toUTF8.toList, "c".toUTF8.toList])
+  check "range short cursor" (cur == none)
+  let (page, more) ← db.range none none none 2
+  check "page length" (page.length == 2)
+  check "page cursor" (more == page.getLast?.map (·.1))
+  let (rest, done) ← db.range none none more 10
+  check "second page" (rest.map (·.1) == ((← db.iterate).map (·.1)).drop 2)
+  check "second cursor" (done == none)
+  let (pref, _) ← db.prefix ("a".toUTF8.toList) none 10
+  check "prefix" (pref.map (·.1.bytes) == ["a".toUTF8.toList, "ab".toUTF8.toList, "ac".toUTF8.toList])
+  db.close
+
+def testColl : IO Unit := do
+  let early := earlyId
+  let late := lateId
+  let name := "box"
+  let kLate := (docKey? (name.toUTF8.toList) late).getD (← mustFit "missing")
+  let epoch : Epoch := { gen := 0, bounds := [kLate.bytes] }
+  let s ← ShardSet.openMem epoch
+  check "insert early" ((← collInsert s name early (.str "e")) == .ok 1)
+  check "insert late" ((← collInsert s name late (.nat 7)) == .ok 1)
+  check "insert again" ((← collInsert s name early (.str "no")) == .conflict)
+  check "homes differ" ((← s.shardId (← requireKey name early)) != (← s.shardId (← requireKey name late)))
+  let (rows, _) ← collList s name none 10
+  check "list length" (rows.length == 2)
+  check "list order" (rows.map (·.id.time) == [1, 5000])
+  check "list values" (rows.map (·.val) == [.str "e", .nat 7])
+  check "bad update" ((← collUpdate s name early 9 (.str "x")) == .conflict)
+  check "update" ((← collUpdate s name early 1 (.str "E")) == .ok 2)
+  check "get" ((← collGet s name early) == some (2, .str "E"))
+  check "bad delete" ((← collDelete s name early 1) == .conflict)
+  check "delete" ((← collDelete s name early 2) == .ok 0)
+  check "gone" ((← collGet s name early) == none)
+  let (left, _) ← collList s name none 10
+  check "one left" (left.map (·.id.time) == [5000])
+  let gen ← IdGen.new (Clock.counter (← IO.mkRef 10))
+  let a ← gen.next
+  let b ← gen.next
+  check "mint order" (a.time < b.time)
+  check "mint insert" ((← collInsert s "gen" a (.bytes [1, 2])) == .ok 1)
+  let (page, cur) ← collList s "gen" none 1
+  check "gen page" (page.length == 1 && cur.map (·.time) == some a.time)
+  let (rest, _) ← collList s "gen" cur 10
+  check "gen rest empty" (rest.isEmpty)
+  s.close
+
 def main : IO UInt32 := do
   testMem
   testCrashCuts
@@ -523,5 +587,7 @@ def main : IO UInt32 := do
   testShardSet
   testShardFiles
   testShardStress
+  testRange
+  testColl
   IO.println "cairn tests ok"
   return 0

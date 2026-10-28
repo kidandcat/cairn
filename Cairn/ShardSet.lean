@@ -205,7 +205,7 @@ it was read. A commit on another shard can land in between. There is no
 serial order between those views. The merge is `mergeAll` / `clusterEntries`:
 sorted by key, and it contains exactly the entries of the parts that were read.
 -/
-def ShardSet.iterate (s : ShardSet) : IO (List (FitBytes × FitBytes)) := do
+private def shardParts (s : ShardSet) : IO (List (List (FitBytes × FitBytes))) := do
   let e ← s.epoch.get
   let n := e.bounds.length + 1
   let mut parts : List (List (FitBytes × FitBytes)) := []
@@ -219,7 +219,27 @@ def ShardSet.iterate (s : ShardSet) : IO (List (FitBytes × FitBytes)) := do
         | .err msg => throw (IO.userError msg)
         | _ => throw (IO.userError "bad reply")
     | .missing => throw (IO.userError "shard has no owner")
-  return mergeAll parts
+  return parts
+
+/--
+Sorted merge of one snapshot per shard, then the page. A prefix may cross
+shards. Each snapshot is that shard at the moment it was read. There is no
+global snapshot. The cursor is a key, so the next call passes it as `after`.
+-/
+def ShardSet.range (s : ShardSet) (lo hi after : Option FitBytes) (limit : Nat) :
+    IO (List (FitBytes × FitBytes) × Option FitBytes) := do
+  let parts ← shardParts s
+  let rows := mergeAll (parts.map fun p => hits p (inRange lo hi after))
+  return (rows.take limit, pageCursor limit rows)
+
+def ShardSet.prefix (s : ShardSet) (pre : Bytes) (after : Option FitBytes) (limit : Nat) :
+    IO (List (FitBytes × FitBytes) × Option FitBytes) := do
+  let parts ← shardParts s
+  let rows := mergeAll (parts.map fun part => hits part (inPrefix pre after))
+  return (rows.take limit, pageCursor limit rows)
+
+def ShardSet.iterate (s : ShardSet) : IO (List (FitBytes × FitBytes)) := do
+  return mergeAll (← shardParts s)
 
 def ShardSet.readLog (s : ShardSet) (shard : Nat) : IO (List Record) := do
   let db ← slot s shard
