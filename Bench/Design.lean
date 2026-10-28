@@ -119,6 +119,24 @@ def runPrefixPages : IO Nat := do
     throw (IO.userError s!"prefix saw {seen}")
   return t1 - t0
 
+def runClaims : IO Nat := do
+  let s ← ShardSet.openMem Epoch.single
+  for i in [0:100] do
+    let t := 1000 + i
+    if ht : t < 2 ^ 48 then
+      Queue.enqueue s 1 0 ⟨t, 1, ht, by decide⟩ [UInt8.ofNat (i % 200)]
+  let t0 ← IO.monoNanosNow
+  let mut n := 0
+  for _ in [0:100] do
+    match ← Queue.claim s 0 1000000 with
+    | some _ => n := n + 1
+    | none => pure ()
+  let t1 ← IO.monoNanosNow
+  s.close
+  if n != 100 then
+    throw (IO.userError s!"claimed {n}")
+  return t1 - t0
+
 def main : IO UInt32 := do
   let cpu ← IO.FS.readFile "/proc/cpuinfo"
   let model := (cpu.splitOn "\n").find? (·.startsWith "model name") |>.getD "model name: unknown"
@@ -132,4 +150,5 @@ def main : IO UInt32 := do
   showRow "file-group-32-shards-4" (4 * gputs) (runGroup 4 gputs 32)
   showRow "file-contended-1-tasks-4" (4 * puts) (runContended 4 puts)
   showRow "mem-prefix-pages" 1000 runPrefixPages
+  showRow "mem-claim-100" 100 runClaims
   return 0

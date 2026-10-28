@@ -78,6 +78,9 @@ structure Ulid where
   hrand : rand < 2 ^ 80
   deriving Repr
 
+instance : BEq Ulid where
+  beq a b := a.time == b.time && a.rand == b.rand
+
 def Ulid.encode (u : Ulid) : Bytes :=
   beBytes 6 u.time ++ beBytes 10 u.rand
 

@@ -137,6 +137,9 @@ lake test
 | `ShardSet.iterate` | Sorted merge of one snapshot per shard. Not a global snapshot. |
 | `ShardSet.range` / `prefix` | Same merge, then the page. A prefix may cross shards. Still not one snapshot. |
 | `collInsert` / `collGet` / `collUpdate` / `collDelete` / `collList` | A collection is a key prefix. Versioned compare-and-set. `collList` is `prefix`. |
+| `Queue.enqueueWith` / `claim` / `ack` / `nack` | Jobs in key order. Outbox is one batch; a cross-shard batch is refused. |
+| `Ttl.put` / `Ttl.sweep` | Expiry index is the key order under prefix `04`. |
+| `ShardSet.watch` | One shard's log from an LSN, filtered by prefix. No cross-shard order. |
 | `ShardSet.serve` | Handle a `ShardReq` for a shard this host owns. |
 | `ShardSet.publish` | Bump the directory generation and set the owner. Does not move bytes. |
 | `ShardSet.pushLog` | `planCatchup` then `Mailbox.send` for one shard. |
@@ -179,6 +182,9 @@ The library does not declare `axiom`, `sorry`, or `partial`. `#print axioms` on 
 | `mergedHits_mem` | A merged page contains an entry iff some shard snapshot did and the predicate matches. |
 | `Ulid.encode_lt_of_lt`, `Ulid.fresh_increases` | Byte order follows time order. The pure id step is strictly increasing. |
 | `resolve_insert_fresh`, `resolve_insert_taken`, `resolve_update_ok`, `resolve_update_conflict`, `resolve_delete_ok`, `resolve_delete_conflict` | Compare-and-set writes the next version only when the stored version matches. |
+| `Job.claim_blocks`, `Job.claim_spec`, `Job.enqueue_idem`, `outbox_both` | A live lease is not claimed again. The same state claims the same id. An idempotency key is not enqueued twice. One outbox batch shows both keys. |
+| `Feed.visible_mem`, `Feed.visible_since`, `Feed.visible_prefix` | A watch hit is an op in that shard's log at or after the LSN, and the key has the prefix. |
+| `Job.due_mem` | A TTL row is due exactly when its expiry is `≤ now`. |
 | `get_insert`, `get_insert_ne`, `get_remove` | Tree insert and erase have the map equations the list index had. |
 | `key_one_shard`, `shardOf_deterministic`, `shardOf_range` | One shard id per key per bounds, in range, a function of the inputs. |
 | `shardHash_range` | The hash id is `< n` when `n > 0`. |
@@ -272,6 +278,15 @@ mem-prefix-pages ops=1000  1131ns/op 884173ops/s  1012ns/op 988142ops/s  931ns/o
 ```
 
 The walk filters each shard's entry list. It is not a tree lower bound. About 1 µs per key on this machine is that filter plus the merge.
+
+A later run after the job queue, on the same machine:
+
+```
+mem-prefix-pages ops=1000  1006ns/op 994035ops/s  883ns/op 1132502ops/s  917ns/op 1090512ops/s
+mem-claim-100 ops=100  178963ns/op 5587ops/s  181739ns/op 5502ops/s  179097ns/op 5583ops/s
+```
+
+`mem-claim-100` enqueues 100 jobs outside the clock, then claims each. About 0.18 ms per claim is another scan of the prefix. The file rows of that run stayed on `fdatasync` (one shard about 0.16–0.37 ms/op).
 
 ## Building
 

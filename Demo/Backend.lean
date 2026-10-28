@@ -29,6 +29,16 @@ def main : IO UInt32 := do
   let clash ← collUpdate s "items" a 1 (.str "no")
   if clash != .conflict then
     throw (IO.userError "cas failed")
+  let id ← gen.next
+  match FitBytes.ofList? [1, 2, 3] with
+  | some anchor => Queue.enqueueWith s anchor [] 1 0 id [7]
+  | none => throw (IO.userError "anchor")
+  match ← Queue.claim s 0 1000 with
+  | some _ => pure ()
+  | none => throw (IO.userError "claim failed")
+  let events ← s.watch 0 0 []
+  if events.isEmpty then
+    throw (IO.userError "feed empty")
   IO.println "backend demo ok"
   s.close
   return 0
