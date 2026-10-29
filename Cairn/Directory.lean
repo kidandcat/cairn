@@ -7,7 +7,7 @@ follower addresses. `reassign` bumps the generation. There is no membership
 protocol here: a later layer calls `reassign` after the bytes have moved.
 
 `NodeId` stays the mailbox address of one replica of one shard (the `InProc`
-buzón). `HostId` is the process that may own several of those addresses.
+mailbox). `HostId` is the process that may own several of those addresses.
 `Locate` is the branch a client takes: local `DB`, or a remote leader. The
 remote arm is the seam a socket would fill. This file does not open one.
 

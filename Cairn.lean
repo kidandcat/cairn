@@ -1,3 +1,4 @@
+import Cairn.Version
 import Cairn.Backup
 import Cairn.Actor
 import Cairn.Coll
