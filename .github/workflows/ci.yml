@@ -7,10 +7,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: version matches changelog
-      run: sh scripts/check_version.sh
-    - uses: leanprover/lean-action@v1
+      - uses: actions/checkout@v4
+      - name: version matches changelog
+        run: sh scripts/check_version.sh
+      - uses: leanprover/lean-action@v1
         with:
           test: true
       - name: backend demo
