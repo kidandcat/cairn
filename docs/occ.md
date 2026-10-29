@@ -1,5 +1,5 @@
-# OCC anotado
+# Annotated OCC
 
-Obsoleto. El read set que anota el llamador puede olvidar una clave y admitir write skew. El camino actual es `ShardSet.transact` con `Tx`. Está en [transacciones.md](transacciones.md).
+Obsolete. The read set the caller annotates can forget a key and admit write skew. The current path is `ShardSet.transact` with `Tx`. It is in [transactions.md](transactions.md).
 
-Los lemas `readsMatch_iff`, `readsMatch_miss` y `occ_conflict` siguen en `Cairn/Occ.lean`: describen el validador viejo, no el mutex.
+The lemmas `readsMatch_iff`, `readsMatch_miss`, and `occ_conflict` remain in `Cairn/Occ.lean`: they describe the old validator, not the mutex.

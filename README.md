@@ -1,10 +1,22 @@
 # cairn
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A small key-value store written in Lean 4 (toolchain `v4.35.0`, the same pin as [uvl](https://github.com/kidandcat/uvl)). One process, one writer per shard, an append-only log per shard, and an in-memory index rebuilt on open. The index is a persistent size-balanced tree (`Std.TreeMap`, delta 3, ratio 2). `get` is that tree's lookup. `insert` shares the branches a reader did not need. `ShardSet` is the cluster surface: it owns one `DB` per shard id and routes with `shardOf`. A later network plugs into `Directory` and `Mailbox` without replacing the codec or the map.
+
+**Version 0.1.0** (`Cairn.version`). Development series: see [Status](#status) and [CHANGELOG.md](CHANGELOG.md).
 
 It is meant for Lean apps that need to keep a map (game state, settings) on the targets uvl cares about: native Linux and macOS now, WebAssembly, Android, and a 32-bit microcontroller later. The core does not call FFI. Lengths in the codec are `UInt32` and sequence numbers are `UInt64`. There is no `USize` in the codec.
 
 This is not a SQL database.
+
+## Status
+
+`0.1.0` is the first numbered release of the code on `main`. It is a SemVer development version. The sections below keep the split; this is the short form.
+
+- **Proved**, as Lean theorems whose `#print axioms` output is only kernel axioms (`propext`, `Quot.sound`, and `Classical.choice` where `omega` is used): batch effects, encode/decode, crash-as-byte-prefix recovery, the CRC-32 burst bound and a proved odd-weight collision, the tree `get` / `insert` / `erase` equations, per-shard serial history, routing, the in-shard `TxRun` model, and copy idempotence. See [What is proved](#what-is-proved).
+- **Tested**, by `lake test` and by the one-off runs recorded in [What is tested](#what-is-tested): file reopen, sampled crash cuts, fuzz of one log, in-process shards, and overlapping tasks. `kill -9` demos recovered a prefix. They did not pull a power cord.
+- **Not verified**: a physical power cut, `dm-flakey`, the macOS `F_FULLFSYNC` path (it is compiled only under `__APPLE__`), the C++ memory model behind `IO.Ref` and `Std.Mutex`, that the C shim's `fdatasync` / `fsync` / `rename` match POSIX beyond the calls `strace` showed, a big-O bound on the tree, and anything on a network. No fixed-width checksum rejects every altered string. See [Non-goals](#non-goals).
 
 ## Guarantees
 
@@ -349,8 +361,34 @@ lake test
 ./scripts/actor_crash.sh
 ```
 
-GitHub Actions runs `lake build` and `lake test` once per push (the workflow is `on: push` only, via `leanprover/lean-action` with `test: true`).
+GitHub Actions runs `sh scripts/check_version.sh`, `lake build`, and `lake test` once per push (the workflow is `on: push` only, via `leanprover/lean-action` with `test: true`), then builds and runs `cairn-backend`.
+
+How to build, the proof policy, and what a pull request should include: [CONTRIBUTING.md](CONTRIBUTING.md). How a version is cut: [RELEASING.md](RELEASING.md).
+
+## Design notes
+
+These are the phase reports. They keep the measurements and the "not proved" lines. `docs/index.md` is the tree-index report, not a table of contents.
+
+| Note | Subject |
+| --- | --- |
+| [docs/concurrency.md](docs/concurrency.md) | Writer designs A–F. Decision: B now, C only if one shard falls short. |
+| [docs/shards.md](docs/shards.md) | One writer per shard. |
+| [docs/index.md](docs/index.md) | Tree index and a log that is not copied. |
+| [docs/collections.md](docs/collections.md) | Ranges, lower bound, collections. |
+| [docs/jobs.md](docs/jobs.md) | Job queue, TTL, change feed. |
+| [docs/occ.md](docs/occ.md) | Annotated OCC. Obsolete; points at transactions. |
+| [docs/transactions.md](docs/transactions.md) | Serializable transactions inside one shard. |
+| [docs/backup.md](docs/backup.md) | Copy up to an LSN, compaction, schema, counters. |
+| [docs/durability.md](docs/durability.md) | Power-loss model and CRC-32. |
+| [docs/copies.md](docs/copies.md) | Copies and messages between shards. |
+| [docs/actors.md](docs/actors.md) | One actor per shard. |
 
 ## License
 
-MIT. Copyright (c) 2026 kidandcat.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+[MIT](LICENSE). Copyright (c) 2026 Jairo Caro-Accino Viciana.
+
+Source files do not carry per-file license headers. `LICENSE` at the repository root covers the tree.
+
+Report a vulnerability through a private GitHub advisory. See [SECURITY.md](SECURITY.md). Community expectations: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

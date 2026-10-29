@@ -1,49 +1,49 @@
-# Un escritor por shard
+# One writer per shard
 
-Informe de la rama `cursor/shard-writer-35e9`. Es la fase 1 de la comparación de concurrencia: el diseño B. Cada shard es un `DB` con su mutex, su fichero y su `Hist`. No hay mutex global. C (OCC dentro de un shard) queda para cuando un solo shard no dé abasto.
+Report from the branch `cursor/shard-writer-35e9`. It is phase 1 of the concurrency comparison: design B. Each shard is a `DB` with its mutex, its file, and its `Hist`. There is no global mutex. C (OCC inside one shard) waits until a single shard is not enough.
 
-## Qué hace la capa
+## What the layer does
 
-`ShardSet` posee un `DB` opcional por id. `get`, `put`, `delete`, `commit` y `commitMany` calculan `shardOf` y entran solo en el mutex de ese `DB`. Un lote con claves de dos shards se rechaza. `iterate` lee una foto por shard y las mezcla en orden de clave (`mergeAll`). Esa mezcla no es una foto global: un commit puede caer en el shard 1 entre la lectura del 0 y la del 1. No hay un orden serial entre shards.
+`ShardSet` owns an optional `DB` per id. `get`, `put`, `delete`, `commit`, and `commitMany` compute `shardOf` and enter only that `DB`'s mutex. A batch with keys from two shards is rejected. `iterate` reads one snapshot per shard and merges them in key order (`mergeAll`). That merge is not a global snapshot: a commit can land on shard 1 between the read of shard 0 and the read of shard 1. There is no serial order across shards.
 
-La costura de clúster, sin red:
+The cluster seam, without a network:
 
-- `HostId` es el proceso. `ShardHost` es la lista de shards que aloja (`Directory.hostView`).
-- `Directory` es el mapa versionado shard → dueño (`ShardOwner`: host líder, `NodeId` del líder, seguidores). `publish` / `reassign` sube la generación y no mueve bytes.
-- `Locate` dice `here`, `remote` o `missing`. Lo remoto llama a `ShardSet.remote`. Por defecto lanza `remote shard`. `serve` es lo que un handler de socket llamaría.
-- `Mailbox` es `send`/`drain`. `InProc.mailbox` es el buzón que ya había. `planCatchup` elige `appendEntries` o `installSnapshot` igual que `catchUp`, y `pushLog` lo manda. El seguidor aplica con `DB.follow`. La longitud del seguidor la pasa el llamador: un latido futuro la traería.
+- `HostId` is the process. `ShardHost` is the list of shards it hosts (`Directory.hostView`).
+- `Directory` is the versioned map shard → owner (`ShardOwner`: leader host, the leader's `NodeId`, followers). `publish` / `reassign` bumps the generation and does not move bytes.
+- `Locate` says `here`, `remote`, or `missing`. The remote arm calls `ShardSet.remote`. By default it throws `remote shard`. `serve` is what a socket handler would call.
+- `Mailbox` is `send`/`drain`. `InProc.mailbox` is the mailbox that was already there. `planCatchup` chooses `appendEntries` or `installSnapshot` the same way `catchUp` does, and `pushLog` sends it. The follower applies it with `DB.follow`. The caller passes the follower length: a future heartbeat would bring it.
 
-Los ficheros son `dir/shard-<id>.cairn`. Un corte de un fichero no reescribe los demás.
+Files are `dir/shard-<id>.cairn`. A cut of one file does not rewrite the others.
 
-## Qué está demostrado
+## What is proved
 
-Reutilizado: `key_one_shard`, `state_eq_serial`, `decodeFile_prefix` / `recovery_prefix`.
+Reused: `key_one_shard`, `state_eq_serial`, `decodeFile_prefix` / `recovery_prefix`.
 
-Añadido, en Lean, sin `sorry` ni `axiom` declarado:
+Added, in Lean, with no `sorry` and no declared `axiom`:
 
-- `route_is_shardOf`: el id de un lote de un solo shard es `shardOf` de su clave.
-- `step_home`, `step_other`, `shard_hist_serial`: el paso escribe el `Hist` de ese shard y ningún otro, y el estado es el pliegue serial de sus propios commits.
-- `steps_commute`: dos escrituras en shards distintos conmutan. No hay un orden global que recuperar.
-- `clusterEntries_sorted`, `clusterEntries_mem`, `cluster_partition`: el merge ordenado contiene exactamente las entradas de las partes, y partir un mapa con `inShard` y volver a mezclarlo devuelve esas entradas. El teorema habla de las fotos que se le pasan, no de un instante común.
-- `crash_shard_independent` y `crash_others`: el prefijo de bytes de un shard es un prefijo de sus registros; el resto de ids no cambia.
+- `route_is_shardOf`: the id of a single-shard batch is `shardOf` of its key.
+- `step_home`, `step_other`, `shard_hist_serial`: the step writes that shard's `Hist` and no other, and the state is the serial fold of its own commits.
+- `steps_commute`: two writes on different shards commute. There is no global order to recover.
+- `clusterEntries_sorted`, `clusterEntries_mem`, `cluster_partition`: the sorted merge contains exactly the entries of the parts, and splitting a map with `inShard` and merging it again returns those entries. The theorem talks about the snapshots it is given, not about one common instant.
+- `crash_shard_independent` and `crash_others`: the byte prefix of one shard is a prefix of its records; the other ids do not change.
 - `reassign_gen`, `reassign_owner`, `locate_here`, `locate_remote`, `plan_agrees`.
 
-No está demostrado que dos `Task` avancen a la vez, ni que el mutex de C++ no deje entrar a dos secciones, ni nada de un socket.
+Not proved: that two `Task`s advance at once, that the C++ mutex does not admit two sections, or anything about a socket.
 
-## Qué solo está probado con tests
+## What is only tested
 
-`lake test` terminó con `cairn tests ok` (el fuzz de siempre: detect 1591, torn 89, miss 0, forge 0). Además:
+`lake test` finished with `cairn tests ok` (the usual fuzz: detect 1591, torn 89, miss 0, forge 0). Also:
 
-- El id que elige `ShardSet` coincide con `shardOf`. El lote cruzado y el vacío fallan. El log de cada shard, al rehacerlo, no contiene las claves del otro.
-- `iterate` es igual a `mergeAll` de las fotos por shard, y sale ordenado.
-- Dos hosts en memoria: el put de una clave del otro host pasa por `remote`/`serve` y aparece en los dos lados. `iterate` mezcla las dos fotos.
-- `pushLog` de un shard vacío de seguidor manda un mensaje; `DB.follow` deja la clave. Un epoch distinto no manda nada.
-- Cuatro tareas de escritura (una por shard, lotes de dos claves) y dos lectoras. Cada foto de un shard tiene el par entero o no lo tiene. Al final, 40 entradas por shard e `iterate` igual al merge.
-- Ficheros: dos tareas, un shard cada una. Tras cerrar, se corta `shard-0.cairn` al header de 4096 bytes. Al reabrir, las claves del shard 0 no están y las del shard 1 siguen.
+- The id `ShardSet` chooses matches `shardOf`. The crossed batch and the empty batch fail. Each shard's log, on replay, does not contain the other shard's keys.
+- `iterate` equals `mergeAll` of the per-shard snapshots, and comes out sorted.
+- Two hosts in memory: a put of a key owned by the other host goes through `remote`/`serve` and shows up on both sides. `iterate` merges the two snapshots.
+- `pushLog` of a shard with an empty follower sends one message; `DB.follow` leaves the key. A different epoch sends nothing.
+- Four writer tasks (one per shard, batches of two keys) and two readers. Each shard snapshot has the whole pair or does not have it. At the end, 40 entries per shard and `iterate` equal to the merge.
+- Files: two tasks, one shard each. After close, `shard-0.cairn` is cut to the 4096-byte header. On reopen, shard 0's keys are gone and shard 1's remain.
 
-## Números
+## Numbers
 
-Una pasada de `cairn-design-bench`, tres repeticiones, 4 vCPU, `Intel(R) Xeon(R) Processor` a 2400 MHz, ext4 en `/dev/vdc`. El reloj no incluye el `open`. Cada put de fichero hace un `fdatasync`.
+One pass of `cairn-design-bench`, three repetitions, 4 vCPU, `Intel(R) Xeon(R) Processor` at 2400 MHz, ext4 on `/dev/vdc`. The clock does not include `open`. Each file put does one `fdatasync`.
 
 ```
 file-shards-1 ops=100  224989ns/op 4444ops/s  156568ns/op 6387ops/s  163593ns/op 6112ops/s
@@ -56,10 +56,10 @@ file-group-32-shards-4 ops=512  6425ns/op 155642ops/s  5400ns/op 185185ops/s  56
 file-contended-1-tasks-4 ops=400  209802ns/op 4766ops/s  181693ns/op 5503ops/s  208523ns/op 4795ops/s
 ```
 
-En fichero, 4 shards hicieron unas tres veces el ritmo de 1 shard (unos 16–19k ops/s frente a unos 4.4–6.4k). 2 shards queda en medio. Cuatro tareas sobre un solo shard se quedan en el ritmo de un shard: el mutex no paraleliza dentro. El group commit de 32, con 4 shards, baja a unos 5–6 µs por put porque la barrera se paga una vez por segmento.
+On a file, 4 shards did about three times the rate of 1 shard (about 16–19k ops/s against about 4.4–6.4k). 2 shards lands in between. Four tasks on a single shard stay at one shard's rate: the mutex does not parallelize inside. The group commit of 32, with 4 shards, drops to about 5–6 µs per put because the barrier is paid once per segment.
 
-Las filas de memoria escalan igual (el doble, luego el cuádruple) pero el absoluto es el backend de memoria copiando la trama de 4096 bytes en cada append. No miden el router a solas y no son un disco.
+The memory rows scale the same way (double, then quadruple) but the absolute is the memory backend copying the 4096-byte frame on every append. They do not measure the router alone and they are not a disk.
 
-## Qué falta para el clúster
+## What is still missing for the cluster
 
-Red (codec de `ShardReq` y `Rpc`, y un transporte detrás de `Mailbox` y `remote`), un protocolo de membresía que llame a `publish` después de `adopt`, y consenso o quórum si un shard tiene que sobrevivir a la caída del líder. Esta fase es copia primario/secundario: el líder gana. Varios escritores del mismo shard siguen fuera.
+A network (a codec for `ShardReq` and `Rpc`, and a transport behind `Mailbox` and `remote`), a membership protocol that calls `publish` after `adopt`, and consensus or a quorum if a shard has to survive the leader dying. This phase is primary/secondary copy: the leader wins. Several writers of the same shard stay out.

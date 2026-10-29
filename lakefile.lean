@@ -2,6 +2,9 @@ import Lake
 open Lake DSL
 
 package cairn where
+  version := v!"0.1.0"
+  license := "MIT"
+  description := "A small key-value store in Lean 4: one writer per shard and an append-only log."
   leanOptions := #[
     ⟨`autoImplicit, false⟩,
     ⟨`relaxedAutoImplicit, false⟩
